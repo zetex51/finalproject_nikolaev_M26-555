@@ -1,0 +1,25 @@
+[project]
+name = "finalproject-nikolaev-m26-555"
+version = "0.1.0"
+description = "Консольное приложение валютного кошелька"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["prettytable>=3.18.0"]
+
+[project.scripts]
+wallet = "finalproject_nikolaev_m26_555.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+exclude = ["venv", ".venv", "dist", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[dependency-groups]
+dev = ["ruff>=0.17.0"]

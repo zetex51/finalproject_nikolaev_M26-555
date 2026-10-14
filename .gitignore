@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local operating-system files
+.DS_Store
