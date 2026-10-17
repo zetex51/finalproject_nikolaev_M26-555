@@ -7,11 +7,14 @@ requires-python = ">=3.12"
 dependencies = ["prettytable>=3.18.0"]
 
 [project.scripts]
-wallet = "finalproject_nikolaev_m26_555.main:main"
+wallet = "valutatrade_hub.cli.interface:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "valutatrade_hub"
 
 [tool.ruff]
 line-length = 88

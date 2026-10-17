@@ -1,4 +1,4 @@
-"""Interactive command line shell for the wallet application."""
+"""Interactive command line interface for ValutaTrade Hub."""
 
 import shlex
 
@@ -8,7 +8,7 @@ class WalletApplication:
 
     def run(self) -> None:
         """Read and process commands until the user exits."""
-        print("Валютный кошелёк. Введите help для справки.")
+        print("ValutaTrade Hub. Введите help для справки.")
         while True:
             try:
                 command = input("wallet> ")
@@ -38,3 +38,8 @@ class WalletApplication:
         else:
             print(f"Неизвестная команда: {command}")
         return False
+
+
+def main() -> None:
+    """Start the interactive command line."""
+    WalletApplication().run()
