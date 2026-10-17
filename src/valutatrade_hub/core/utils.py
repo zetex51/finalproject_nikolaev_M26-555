@@ -29,9 +29,7 @@ def validate_password(password: str) -> str:
     if not isinstance(password, str):
         raise TypeError("Пароль должен быть строкой.")
     if len(password) < PASSWORD_MIN_LENGTH:
-        raise ValueError(
-            f"Пароль должен содержать не менее {PASSWORD_MIN_LENGTH} символов."
-        )
+        raise ValueError(f"Пароль должен быть не короче {PASSWORD_MIN_LENGTH} символов")
     return password
 
 
