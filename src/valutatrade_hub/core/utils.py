@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 PASSWORD_MIN_LENGTH = 4
-_CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z0-9]{2,10}$")
+_CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z0-9]{2,5}$")
 
 # Demonstration values expressed as USD per one unit of the named currency.
 # A future parser service can supply live rates to the use cases instead.
@@ -60,12 +60,12 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
 
 
 def normalize_currency_code(currency_code: str) -> str:
-    """Normalize and validate a fiat or cryptocurrency ticker."""
+    """Normalize and validate a two-to-five-character currency ticker."""
     if not isinstance(currency_code, str):
         raise TypeError("Код валюты должен быть строкой.")
     normalized = currency_code.strip().upper()
-    if not _CURRENCY_CODE_PATTERN.fullmatch(normalized):
-        raise ValueError("Код валюты должен содержать от 2 до 10 букв или цифр.")
+    if not normalized.isascii() or not _CURRENCY_CODE_PATTERN.fullmatch(normalized):
+        raise ValueError("Код валюты должен содержать от 2 до 5 букв или цифр.")
     return normalized
 
 
@@ -99,3 +99,21 @@ def resolve_exchange_rates(
         code = normalize_currency_code(currency_code)
         resolved[code] = validate_amount(rate)
     return resolved
+
+
+def convert_currency(
+    amount: int | float,
+    from_currency: str,
+    to_currency: str,
+    exchange_rates: Mapping[str, int | float] | None = None,
+) -> float:
+    """Convert an amount using rates expressed as USD per currency unit."""
+    quantity = validate_amount(amount, allow_zero=True)
+    source = normalize_currency_code(from_currency)
+    target = normalize_currency_code(to_currency)
+    rates = resolve_exchange_rates(exchange_rates)
+    if source not in rates:
+        raise ValueError(f"Нет курса для валюты {source}.")
+    if target not in rates:
+        raise ValueError(f"Нет курса для валюты {target}.")
+    return validate_amount(quantity * rates[source] / rates[target], allow_zero=True)

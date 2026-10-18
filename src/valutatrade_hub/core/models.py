@@ -4,7 +4,9 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+from valutatrade_hub.core.currencies import Currency, get_currency
 from valutatrade_hub.core.utils import (
+    convert_currency,
     generate_salt,
     hash_password,
     normalize_currency_code,
@@ -169,6 +171,11 @@ class Wallet:
         return self._currency_code
 
     @property
+    def currency(self) -> Currency:
+        """Return the registered currency metadata for this wallet."""
+        return get_currency(self._currency_code)
+
+    @property
     def balance(self) -> float:
         """Return the current balance."""
         return self._balance
@@ -294,12 +301,11 @@ class Portfolio:
         if base_code not in rates:
             raise ValueError(f"Нет курса для базовой валюты {base_code}.")
 
-        base_rate = rates[base_code]
         total = 0.0
         for code, wallet in self._wallets.items():
             if code not in rates:
                 raise ValueError(f"Нет курса для валюты {code}.")
-            total += wallet.balance * rates[code] / base_rate
+            total += convert_currency(wallet.balance, code, base_code, rates)
         return total
 
     def to_dict(self) -> dict[str, Any]:

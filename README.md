@@ -46,9 +46,31 @@ exit
 действует пять минут; `get-rate` показывает курс, время обновления и обратный
 курс.
 
-Валюта задаётся кодом из 2–10 латинских букв или цифр. Количество при покупке и
+Валюта задаётся кодом из 2–5 латинских букв или цифр. Количество при покупке и
 продаже должно быть конечным числом больше нуля. Пароль должен содержать не
 менее четырёх символов. Пользовательские данные и портфели не добавляются в Git.
+
+## Типы валют
+
+В модуле `valutatrade_hub.core.currencies` есть абстрактный класс `Currency` и
+его наследники `FiatCurrency` и `CryptoCurrency`. Каждый объект проверяет
+название и код, а `get_display_info()` возвращает строку для интерфейса и логов.
+Кошелёк предоставляет метаданные валюты через свойство `currency`.
+
+```python
+from valutatrade_hub.core import CryptoCurrency, get_currency
+
+bitcoin = get_currency("BTC")
+print(bitcoin.get_display_info())
+
+custom_coin = CryptoCurrency("Example Coin", "EXM", "SHA-256", 1.12e12)
+print(custom_coin.get_display_info())
+```
+
+Реестр содержит USD, EUR, RUB, BTC и ETH. Он расширяется функцией
+`register_currency()`. Если корректный код отсутствует в реестре,
+`get_currency()` поднимает `CurrencyNotFoundError`. Рыночная капитализация в
+реестре демонстрационная; данные Parser Service пока не подключены.
 
 ## Использование моделей из Python
 
@@ -81,6 +103,8 @@ uv build
 src/valutatrade_hub/
 ├── core/
 │   ├── models.py      # пользователи, кошельки и портфели
+│   ├── currencies.py  # базовый тип, классы валют и реестр
+│   ├── exceptions.py  # предметные исключения
 │   ├── storage.py     # JSON-хранилище
 │   ├── usecases.py    # сервис аккаунтов, курсов и операций
 │   └── utils.py       # хеширование, проверки и курсы
