@@ -251,7 +251,7 @@ class WalletApplication:
         updated_at = quote.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         print(
             f"Курс {quote.from_currency}→{quote.to_currency}: {quote.rate:.8f} "
-            f"(обновлено: {updated_at})"
+            f"(обновлено: {updated_at}, источник: {quote.source})"
         )
         print(
             f"Обратный курс {reverse_quote.from_currency}→"
@@ -324,7 +324,15 @@ class WalletApplication:
 
     @staticmethod
     def _print_api_error(error: ApiRequestError) -> None:
-        print(f"{error}. Повторите попытку позже и проверьте подключение к сети.")
+        print(error)
+        if "EXCHANGERATE_API_KEY" in error.reason:
+            print("Задайте ключ ExchangeRate-API в переменной окружения.")
+        elif "invalid-key" in error.reason:
+            print("Проверьте значение EXCHANGERATE_API_KEY.")
+        elif "quota-reached" in error.reason:
+            print("Лимит запросов исчерпан; повторите попытку позже.")
+        else:
+            print("Повторите попытку позже и проверьте подключение к сети.")
 
     @staticmethod
     def _show_help() -> None:

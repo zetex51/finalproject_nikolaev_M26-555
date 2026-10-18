@@ -1,5 +1,6 @@
 """Singleton configuration loader for ValutaTrade Hub."""
 
+import math
 import os
 import tomllib
 from pathlib import Path
@@ -18,6 +19,7 @@ class SettingsLoader:
     _defaults: dict[str, Any] = {
         "data_dir": "data",
         "rates_ttl_seconds": 300,
+        "rates_timeout_seconds": 10,
         "default_base_currency": "USD",
         "log_file": "logs/actions.log",
         "log_format": "%(levelname)s %(asctime)s %(message)s",
@@ -77,6 +79,14 @@ class SettingsLoader:
                 raise ValueError(
                     "VALUTATRADE_RATES_TTL_SECONDS должен быть целым числом."
                 ) from error
+        timeout = os.environ.get("VALUTATRADE_RATES_TIMEOUT_SECONDS")
+        if timeout is not None:
+            try:
+                values["rates_timeout_seconds"] = float(timeout)
+            except ValueError as error:
+                raise ValueError(
+                    "VALUTATRADE_RATES_TIMEOUT_SECONDS должен быть числом."
+                ) from error
         values.update(
             {key: value for key, value in environment_values.items() if value}
         )
@@ -88,6 +98,14 @@ class SettingsLoader:
             raise ValueError(
                 "rates_ttl_seconds должен быть положительным целым числом."
             )
+        timeout = values.get("rates_timeout_seconds")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("rates_timeout_seconds должен быть положительным числом.")
         if not isinstance(values.get("default_base_currency"), str):
             raise ValueError("default_base_currency должен быть строкой.")
         self._values = values

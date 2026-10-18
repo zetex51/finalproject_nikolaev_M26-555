@@ -18,7 +18,6 @@ from valutatrade_hub.core.exceptions import (
 from valutatrade_hub.core.models import Portfolio, User
 from valutatrade_hub.core.storage import JsonStorage
 from valutatrade_hub.core.utils import (
-    DEFAULT_EXCHANGE_RATES,
     convert_currency,
     resolve_exchange_rates,
     validate_amount,
@@ -26,6 +25,7 @@ from valutatrade_hub.core.utils import (
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.services.parser import ParserService
 
 
 @dataclass(frozen=True)
@@ -144,9 +144,14 @@ class WalletService:
 
     RATE_TTL = timedelta(minutes=5)
 
-    def __init__(self, storage: JsonStorage | DatabaseManager | None = None) -> None:
+    def __init__(
+        self,
+        storage: JsonStorage | DatabaseManager | None = None,
+        parser_service: ParserService | None = None,
+    ) -> None:
         self.settings = SettingsLoader()
         self.storage = DatabaseManager() if storage is None else storage
+        self.parser_service = parser_service or ParserService(self.settings)
         self.RATE_TTL = timedelta(seconds=self.settings.get("rates_ttl_seconds", 300))
         self._current_user_id: int | None = None
         self._current_username: str | None = None
@@ -207,20 +212,18 @@ class WalletService:
 
     @log_action("GET_RATE", verbose=True)
     def get_rate(self, from_currency: str, to_currency: str) -> RateQuote:
-        """Return a fresh cached rate or refresh it from the local rate stub."""
+        """Return a fresh cached rate or refresh it through the parser service."""
         source = get_currency(from_currency).code
         target = get_currency(to_currency).code
         now = datetime.now(timezone.utc)
         if source == target:
             return RateQuote(source, target, 1.0, now, "Identity")
 
+        pair_key = f"{source}_{target}"
+        reverse_key = f"{target}_{source}"
         try:
             with self.storage.transaction():
-                try:
-                    cached_rates = self.storage.load_rates()
-                except (OSError, ValueError):
-                    cached_rates = {}
-                pair_key = f"{source}_{target}"
+                cached_rates = self._load_rates_safely()
                 cached_quote = self._fresh_quote(
                     cached_rates,
                     pair_key,
@@ -231,7 +234,6 @@ class WalletService:
                 if cached_quote is not None:
                     return cached_quote
 
-                reverse_key = f"{target}_{source}"
                 reverse_quote = self._fresh_quote(
                     cached_rates,
                     reverse_key,
@@ -249,25 +251,40 @@ class WalletService:
                     )
                     self._cache_quote(cached_rates, quote)
                     return quote
+        except (OSError, ValueError) as error:
+            raise ApiRequestError(
+                f"не удалось прочитать кеш курсов: {error}"
+            ) from error
 
-                rates = resolve_exchange_rates(DEFAULT_EXCHANGE_RATES)
-                if source not in rates or target not in rates:
-                    raise ApiRequestError(
-                        f"курс {source}→{target} отсутствует в кеше и заглушке"
-                    )
-                quote = RateQuote(
+        parsed_quote = self.parser_service.get_rate(source, target)
+        quote = RateQuote(
+            parsed_quote.from_currency,
+            parsed_quote.to_currency,
+            parsed_quote.rate,
+            parsed_quote.updated_at,
+            parsed_quote.source,
+        )
+        try:
+            with self.storage.transaction():
+                cached_rates = self._load_rates_safely()
+                # Another caller may have refreshed the pair while the network
+                # request was in flight. Prefer that quote if it is still fresh.
+                refreshed_at = datetime.now(timezone.utc)
+                cached_quote = self._fresh_quote(
+                    cached_rates,
+                    pair_key,
                     source,
                     target,
-                    rates[source] / rates[target],
-                    now,
-                    "LocalStub",
+                    refreshed_at,
                 )
+                if cached_quote is not None:
+                    return cached_quote
                 self._cache_quote(cached_rates, quote)
                 return quote
-        except ApiRequestError:
-            raise
         except (OSError, ValueError) as error:
-            raise ApiRequestError(f"не удалось обновить кеш курсов: {error}") from error
+            raise ApiRequestError(
+                f"не удалось сохранить кеш курсов: {error}"
+            ) from error
 
     def ensure_authenticated(self) -> User:
         """Return the active user or raise when no session is logged in."""
@@ -310,19 +327,23 @@ class WalletService:
         user_id: int | None = None,
     ) -> TradeReport:
         """Buy currency for the current user and persist the new balance."""
+        user = self._require_user(user_id)
+        code = get_currency(currency_code).code
+        quantity = validate_amount(amount)
+        quote = self.get_rate(code, "USD")
         with self.storage.transaction():
-            return self._buy(currency_code, amount, user_id)
+            return self._buy(code, quantity, user.user_id, quote)
 
     def _buy(
         self,
         currency_code: str,
         amount: int | float,
         user_id: int | None,
+        quote: RateQuote,
     ) -> TradeReport:
         user = self._require_user(user_id)
         code = get_currency(currency_code).code
         quantity = validate_amount(amount)
-        quote = self.get_rate(code, "USD")
 
         portfolio = self._load_portfolio(user)
         wallet = portfolio.wallets.get(code)
@@ -354,15 +375,6 @@ class WalletService:
         user_id: int | None = None,
     ) -> TradeReport:
         """Sell currency for the current user and persist the new balances."""
-        with self.storage.transaction():
-            return self._sell(currency_code, amount, user_id)
-
-    def _sell(
-        self,
-        currency_code: str,
-        amount: int | float,
-        user_id: int | None,
-    ) -> TradeReport:
         user = self._require_user(user_id)
         code = get_currency(currency_code).code
         quantity = validate_amount(amount)
@@ -374,6 +386,26 @@ class WalletService:
         if quantity > wallet.balance:
             raise InsufficientFundsError(code, wallet.balance, quantity)
         quote = self.get_rate(code, "USD")
+        with self.storage.transaction():
+            return self._sell(code, quantity, user.user_id, quote)
+
+    def _sell(
+        self,
+        currency_code: str,
+        amount: int | float,
+        user_id: int | None,
+        quote: RateQuote,
+    ) -> TradeReport:
+        user = self._require_user(user_id)
+        code = get_currency(currency_code).code
+        quantity = validate_amount(amount)
+        portfolio = self._load_portfolio(user)
+        try:
+            wallet = portfolio.get_wallet(code)
+        except KeyError as error:
+            raise WalletNotFoundError(code) from error
+        if quantity > wallet.balance:
+            raise InsufficientFundsError(code, wallet.balance, quantity)
 
         previous_balance = wallet.balance
         estimated_value = sell_currency(
@@ -460,21 +492,37 @@ class WalletService:
             return None
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
-        if now - updated_at > self.RATE_TTL:
+        cache_time_value = entry.get("cached_at", updated_at_value)
+        try:
+            cached_at = datetime.fromisoformat(cache_time_value)
+        except (TypeError, ValueError):
+            cached_at = updated_at
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        if now - cached_at > self.RATE_TTL:
             return None
         source = entry.get("source", rates.get("source", "RateCache"))
         return RateQuote(from_currency, to_currency, rate, updated_at, str(source))
 
+    def _load_rates_safely(self) -> dict[str, object]:
+        try:
+            return self.storage.load_rates()
+        except (OSError, ValueError):
+            return {}
+
     def _cache_quote(self, rates: dict[str, object], quote: RateQuote) -> None:
         updated_at = quote.updated_at.isoformat()
+        cached_at = datetime.now(timezone.utc).isoformat()
         rates[f"{quote.from_currency}_{quote.to_currency}"] = {
             "rate": quote.rate,
             "updated_at": updated_at,
+            "cached_at": cached_at,
             "source": quote.source,
         }
         rates[f"{quote.to_currency}_{quote.from_currency}"] = {
             "rate": 1.0 / quote.rate,
             "updated_at": updated_at,
+            "cached_at": cached_at,
             "source": quote.source,
         }
         rates["source"] = quote.source

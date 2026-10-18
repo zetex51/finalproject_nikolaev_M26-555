@@ -12,14 +12,16 @@ PASSWORD_MIN_LENGTH = 4
 _CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z0-9]{2,5}$")
 
 # Demonstration values expressed as USD per one unit of the named currency.
-# A future parser service can supply live rates to the use cases instead.
+# Local fiat rates keep the CLI usable when no ExchangeRate-API key is set.
 DEFAULT_EXCHANGE_RATES = MappingProxyType(
     {
         "USD": 1.0,
         "EUR": 1.08,
+        "GBP": 1.27,
         "RUB": 0.011,
         "BTC": 65000.0,
         "ETH": 3000.0,
+        "SOL": 150.0,
     }
 )
 
