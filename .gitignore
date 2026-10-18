@@ -9,6 +9,7 @@ dist/
 # Local wallet data (contains account hashes and portfolio balances)
 data/*.json
 data/.*.tmp
+logs/
 
 # Virtual environments
 .venv/

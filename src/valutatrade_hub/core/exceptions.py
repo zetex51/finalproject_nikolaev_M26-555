@@ -26,7 +26,15 @@ class CurrencyNotFoundError(LookupError):
 
     def __init__(self, currency_code: str) -> None:
         self.currency_code = currency_code
-        super().__init__(f"Валюта '{currency_code}' не найдена в реестре.")
+        super().__init__(f"Неизвестная валюта '{currency_code}'")
+
+
+class ApiRequestError(RuntimeError):
+    """Raised when an external or fallback rate provider cannot serve a quote."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Ошибка при обращении к внешнему API: {reason}")
 
 
 class RateUnavailableError(ValueError):
@@ -44,4 +52,7 @@ class InsufficientFundsError(ValueError):
         self.currency_code = currency_code
         self.available = available
         self.required = required
-        super().__init__(currency_code)
+        super().__init__(
+            f"Недостаточно средств: доступно {available:g} {currency_code}, "
+            f"требуется {required:g} {currency_code}"
+        )

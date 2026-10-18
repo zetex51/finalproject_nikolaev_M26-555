@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from valutatrade_hub.core.currencies import Currency, get_currency
+from valutatrade_hub.core.exceptions import InsufficientFundsError
 from valutatrade_hub.core.utils import (
     convert_currency,
     generate_salt,
@@ -194,7 +195,11 @@ class Wallet:
         """Withdraw a positive amount if the balance is sufficient."""
         normalized = validate_amount(amount)
         if normalized > self._balance:
-            raise ValueError(f"Недостаточно средств в кошельке {self._currency_code}.")
+            raise InsufficientFundsError(
+                self._currency_code,
+                self._balance,
+                normalized,
+            )
         self.balance = self._balance - normalized
         return self._balance
 

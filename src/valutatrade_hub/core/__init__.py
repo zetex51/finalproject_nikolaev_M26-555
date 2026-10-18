@@ -8,6 +8,7 @@ from valutatrade_hub.core.currencies import (
     register_currency,
 )
 from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
     CurrencyNotFoundError,
     InsufficientFundsError,
     InvalidCredentialsError,
@@ -31,6 +32,7 @@ from valutatrade_hub.core.usecases import (
 from valutatrade_hub.core.utils import convert_currency
 
 __all__ = [
+    "ApiRequestError",
     "Currency",
     "CurrencyNotFoundError",
     "CryptoCurrency",

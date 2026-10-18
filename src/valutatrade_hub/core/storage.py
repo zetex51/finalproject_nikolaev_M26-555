@@ -3,9 +3,11 @@
 import json
 import os
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from threading import RLock
+from typing import Any, Iterator
 
 from valutatrade_hub.core.models import Portfolio, User
 
@@ -14,7 +16,12 @@ class JsonStorage:
     """Read and write the application's three JSON data files."""
 
     def __init__(self, data_dir: str | Path | None = None) -> None:
-        configured_dir = data_dir or os.environ.get("VALUTATRADE_DATA_DIR", "data")
+        self._lock = RLock()
+        configured_dir = data_dir or os.environ.get("VALUTATRADE_DATA_DIR")
+        if configured_dir is None:
+            from valutatrade_hub.infra.settings import SettingsLoader
+
+            configured_dir = SettingsLoader().get("data_dir", "data")
         self.data_dir = Path(configured_dir)
         self.users_path = self.data_dir / "users.json"
         self.portfolios_path = self.data_dir / "portfolios.json"
@@ -23,30 +30,40 @@ class JsonStorage:
 
     def initialize(self) -> None:
         """Create the data directory and empty JSON files when needed."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        for path, default in (
-            (self.users_path, []),
-            (self.portfolios_path, []),
-            (self.rates_path, {}),
-        ):
-            if not path.exists():
-                self._write_json(path, default)
+        with self.transaction():
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            for path, default in (
+                (self.users_path, []),
+                (self.portfolios_path, []),
+                (self.rates_path, {}),
+            ):
+                if not path.exists():
+                    self._write_json(path, default)
+
+    @contextmanager
+    def transaction(self) -> Iterator["JsonStorage"]:
+        """Serialize read-modify-write transactions within this process."""
+        with self._lock:
+            yield self
 
     def load_users(self) -> list[User]:
         """Load all persisted users."""
-        data = self._read_json(self.users_path, list)
+        with self._lock:
+            data = self._read_json(self.users_path, list)
         return [User.from_dict(record) for record in data]
 
     def save_users(self, users: Sequence[User]) -> None:
         """Persist all users, including only salted password hashes."""
-        self._write_json(self.users_path, [user.to_dict() for user in users])
+        with self._lock:
+            self._write_json(self.users_path, [user.to_dict() for user in users])
 
     def load_portfolios(
         self,
         users_by_id: Mapping[int, User] | None = None,
     ) -> list[Portfolio]:
         """Load portfolios and attach users when they are available."""
-        data = self._read_json(self.portfolios_path, list)
+        with self._lock:
+            data = self._read_json(self.portfolios_path, list)
         users = users_by_id or {}
         return [
             Portfolio.from_dict(record, user=users.get(record.get("user_id")))
@@ -55,18 +72,21 @@ class JsonStorage:
 
     def save_portfolios(self, portfolios: Sequence[Portfolio]) -> None:
         """Persist portfolio and wallet balances."""
-        self._write_json(
-            self.portfolios_path,
-            [portfolio.to_dict() for portfolio in portfolios],
-        )
+        with self._lock:
+            self._write_json(
+                self.portfolios_path,
+                [portfolio.to_dict() for portfolio in portfolios],
+            )
 
     def load_rates(self) -> dict[str, Any]:
         """Load the cached pair rates and refresh metadata."""
-        return self._read_json(self.rates_path, dict)
+        with self._lock:
+            return self._read_json(self.rates_path, dict)
 
     def save_rates(self, rates: Mapping[str, Any]) -> None:
         """Persist cached rates and refresh metadata."""
-        self._write_json(self.rates_path, dict(rates))
+        with self._lock:
+            self._write_json(self.rates_path, dict(rates))
 
     @staticmethod
     def _read_json(path: Path, expected_type: type) -> Any:
