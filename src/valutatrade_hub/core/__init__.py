@@ -6,6 +6,7 @@ from valutatrade_hub.core.currencies import (
     FiatCurrency,
     get_currency,
     register_currency,
+    supported_currency_codes,
 )
 from valutatrade_hub.core.exceptions import (
     ApiRequestError,
@@ -58,4 +59,5 @@ __all__ = [
     "get_currency",
     "register_currency",
     "sell_currency",
+    "supported_currency_codes",
 ]

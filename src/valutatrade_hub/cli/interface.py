@@ -4,6 +4,8 @@ import shlex
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import supported_currency_codes
+from valutatrade_hub.core.exceptions import ApiRequestError, CurrencyNotFoundError
 from valutatrade_hub.core.usecases import (
     InsufficientFundsError,
     InvalidCredentialsError,
@@ -70,6 +72,10 @@ class WalletApplication:
 
         try:
             handler(parts[1:])
+        except CurrencyNotFoundError as error:
+            self._print_currency_error(error)
+        except ApiRequestError as error:
+            self._print_api_error(error)
         except (TypeError, ValueError) as error:
             message = str(error)
             if "положительн" in message or "конечным числом" in message:
@@ -115,14 +121,17 @@ class WalletApplication:
 
     def _show_portfolio(self, arguments: list[str]) -> None:
         options = self._parse_options(arguments, optional={"--base"})
-        base_currency = options.get("--base", "USD")
+        base_currency = options.get("--base")
         try:
             report = self.service.show_portfolio(base_currency)
         except NotAuthenticatedError:
             print("Сначала выполните login")
             return
+        except CurrencyNotFoundError as error:
+            self._print_currency_error(error)
+            return
         except UnknownCurrencyError:
-            print(f"Неизвестная базовая валюта '{base_currency.upper()}'")
+            print(f"Неизвестная базовая валюта '{(base_currency or 'USD').upper()}'")
             return
 
         print(
@@ -155,16 +164,22 @@ class WalletApplication:
             required={"--currency", "--amount"},
         )
         try:
-            self.service.ensure_authenticated()
+            user = self.service.ensure_authenticated()
         except NotAuthenticatedError:
             print("Сначала выполните login")
             return
         currency_code = options["--currency"]
         amount = self._parse_amount(options["--amount"])
         try:
-            report = self.service.buy(currency_code, amount)
+            report = self.service.buy(currency_code, amount, user_id=user.user_id)
         except NotAuthenticatedError:
             print("Сначала выполните login")
+            return
+        except CurrencyNotFoundError as error:
+            self._print_currency_error(error)
+            return
+        except ApiRequestError as error:
+            self._print_api_error(error)
             return
         except RateUnavailableError:
             code = currency_code.strip().upper()
@@ -179,16 +194,19 @@ class WalletApplication:
             required={"--currency", "--amount"},
         )
         try:
-            self.service.ensure_authenticated()
+            user = self.service.ensure_authenticated()
         except NotAuthenticatedError:
             print("Сначала выполните login")
             return
         currency_code = options["--currency"]
         amount = self._parse_amount(options["--amount"])
         try:
-            report = self.service.sell(currency_code, amount)
+            report = self.service.sell(currency_code, amount, user_id=user.user_id)
         except NotAuthenticatedError:
             print("Сначала выполните login")
+            return
+        except CurrencyNotFoundError as error:
+            self._print_currency_error(error)
             return
         except WalletNotFoundError:
             code = currency_code.strip().upper()
@@ -198,12 +216,10 @@ class WalletApplication:
             )
             return
         except InsufficientFundsError as error:
-            available = self._format_amount(error.available, error.currency_code)
-            required = self._format_amount(error.required, error.currency_code)
-            print(
-                f"Недостаточно средств: доступно {available} "
-                f"{error.currency_code}, требуется {required} {error.currency_code}"
-            )
+            print(error)
+            return
+        except ApiRequestError as error:
+            self._print_api_error(error)
             return
         except RateUnavailableError:
             code = currency_code.strip().upper()
@@ -222,10 +238,14 @@ class WalletApplication:
         try:
             quote = self.service.get_rate(from_currency, to_currency)
             reverse_quote = self.service.get_rate(to_currency, from_currency)
-        except RateUnavailableError:
-            source = from_currency.strip().upper()
-            target = to_currency.strip().upper()
-            print(f"Курс {source}→{target} недоступен. Повторите попытку позже.")
+        except CurrencyNotFoundError as error:
+            self._print_currency_error(error)
+            return
+        except ApiRequestError as error:
+            self._print_api_error(error)
+            return
+        except RateUnavailableError as error:
+            self._print_api_error(ApiRequestError(str(error)))
             return
 
         updated_at = quote.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -295,6 +315,16 @@ class WalletApplication:
     def _format_amount(amount: float, currency_code: str) -> str:
         precision = 4 if currency_code in {"BTC", "ETH"} else 2
         return f"{amount:,.{precision}f}"
+
+    @staticmethod
+    def _print_currency_error(error: CurrencyNotFoundError) -> None:
+        codes = ", ".join(supported_currency_codes())
+        print(f"{error}. Поддерживаемые коды: {codes}.")
+        print("Проверьте код в команде get-rate --from USD --to <код>.")
+
+    @staticmethod
+    def _print_api_error(error: ApiRequestError) -> None:
+        print(f"{error}. Повторите попытку позже и проверьте подключение к сети.")
 
     @staticmethod
     def _show_help() -> None:

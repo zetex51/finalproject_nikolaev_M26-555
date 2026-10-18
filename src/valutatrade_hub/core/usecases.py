@@ -4,12 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from valutatrade_hub.core.currencies import get_currency
 from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
     InsufficientFundsError,
     InvalidCredentialsError,
     NotAuthenticatedError,
     RateUnavailableError,
-    UnknownCurrencyError,
     UserAlreadyExistsError,
     UserNotFoundError,
     WalletNotFoundError,
@@ -18,10 +19,13 @@ from valutatrade_hub.core.models import Portfolio, User
 from valutatrade_hub.core.storage import JsonStorage
 from valutatrade_hub.core.utils import (
     DEFAULT_EXCHANGE_RATES,
-    normalize_currency_code,
+    convert_currency,
     resolve_exchange_rates,
     validate_amount,
 )
+from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.database import DatabaseManager
+from valutatrade_hub.infra.settings import SettingsLoader
 
 
 @dataclass(frozen=True)
@@ -74,21 +78,27 @@ def buy_currency(
     exchange_rates: Mapping[str, int | float] | None = None,
 ) -> float:
     """Add a purchased quantity and return its estimated value in USD."""
-    code = normalize_currency_code(currency_code)
+    code = get_currency(currency_code).code
     quantity = validate_amount(amount)
     rates = resolve_exchange_rates(exchange_rates)
     if code not in rates:
         raise RateUnavailableError(f"Не удалось получить курс для {code}→USD.")
 
+    estimated_value = convert_currency(
+        quantity,
+        code,
+        "USD",
+        {"USD": rates["USD"], code: rates[code]},
+    )
     target_wallet = portfolio.wallets.get(code)
-    new_balance = validate_amount(
+    validate_amount(
         (target_wallet.balance if target_wallet is not None else 0.0) + quantity,
         allow_zero=True,
     )
     if target_wallet is None:
         target_wallet = portfolio.add_currency(code)
-    target_wallet.balance = new_balance
-    return validate_amount(quantity * rates[code] / rates["USD"])
+    target_wallet.deposit(quantity)
+    return estimated_value
 
 
 def sell_currency(
@@ -98,7 +108,7 @@ def sell_currency(
     exchange_rates: Mapping[str, int | float] | None = None,
 ) -> float:
     """Remove a quantity, credit USD, and return the estimated proceeds."""
-    code = normalize_currency_code(currency_code)
+    code = get_currency(currency_code).code
     quantity = validate_amount(amount)
     if code == "USD":
         raise ValueError("Нельзя продать USD за USD.")
@@ -111,19 +121,20 @@ def sell_currency(
     except KeyError as error:
         raise WalletNotFoundError(code) from error
 
-    if quantity > source_wallet.balance:
-        raise InsufficientFundsError(code, source_wallet.balance, quantity)
-
-    proceeds = validate_amount(quantity * rates[code] / rates["USD"])
+    proceeds = convert_currency(
+        quantity,
+        code,
+        "USD",
+        {"USD": rates["USD"], code: rates[code]},
+    )
     usd_wallet = portfolio.wallets.get("USD")
     usd_balance = validate_amount(
         (usd_wallet.balance if usd_wallet is not None else 0.0) + proceeds,
         allow_zero=True,
     )
-    source_balance = validate_amount(source_wallet.balance - quantity, allow_zero=True)
+    source_wallet.withdraw(quantity)
     if usd_wallet is None:
         usd_wallet = portfolio.add_currency("USD")
-    source_wallet.balance = source_balance
     usd_wallet.balance = usd_balance
     return proceeds
 
@@ -133,12 +144,25 @@ class WalletService:
 
     RATE_TTL = timedelta(minutes=5)
 
-    def __init__(self, storage: JsonStorage | None = None) -> None:
-        self.storage = storage or JsonStorage()
+    def __init__(self, storage: JsonStorage | DatabaseManager | None = None) -> None:
+        self.settings = SettingsLoader()
+        self.storage = DatabaseManager() if storage is None else storage
+        self.RATE_TTL = timedelta(seconds=self.settings.get("rates_ttl_seconds", 300))
         self._current_user_id: int | None = None
+        self._current_username: str | None = None
 
+    @property
+    def current_username(self) -> str | None:
+        """Return the active username for log context without reading storage."""
+        return self._current_username
+
+    @log_action("REGISTER")
     def register(self, username: str, password: str) -> User:
         """Create a user and an empty portfolio, persisting both."""
+        with self.storage.transaction():
+            return self._register(username, password)
+
+    def _register(self, username: str, password: str) -> User:
         if not isinstance(username, str):
             raise TypeError("Имя пользователя должно быть строкой.")
         normalized_username = username.strip()
@@ -161,6 +185,7 @@ class WalletService:
         self.storage.save_portfolios(portfolios)
         return user
 
+    @log_action("LOGIN")
     def login(self, username: str, password: str) -> User:
         """Verify credentials and retain the user's ID for this CLI session."""
         users = self.storage.load_users()
@@ -177,66 +202,86 @@ class WalletService:
         if not user.verify_password(password):
             raise InvalidCredentialsError("Неверный пароль")
         self._current_user_id = user.user_id
+        self._current_username = user.username
         return user
 
+    @log_action("GET_RATE", verbose=True)
     def get_rate(self, from_currency: str, to_currency: str) -> RateQuote:
         """Return a fresh cached rate or refresh it from the local rate stub."""
-        source = normalize_currency_code(from_currency)
-        target = normalize_currency_code(to_currency)
+        source = get_currency(from_currency).code
+        target = get_currency(to_currency).code
         now = datetime.now(timezone.utc)
         if source == target:
             return RateQuote(source, target, 1.0, now, "Identity")
 
-        cached_rates = self.storage.load_rates()
-        pair_key = f"{source}_{target}"
-        cached_quote = self._fresh_quote(cached_rates, pair_key, source, target, now)
-        if cached_quote is not None:
-            return cached_quote
+        try:
+            with self.storage.transaction():
+                try:
+                    cached_rates = self.storage.load_rates()
+                except (OSError, ValueError):
+                    cached_rates = {}
+                pair_key = f"{source}_{target}"
+                cached_quote = self._fresh_quote(
+                    cached_rates,
+                    pair_key,
+                    source,
+                    target,
+                    now,
+                )
+                if cached_quote is not None:
+                    return cached_quote
 
-        reverse_key = f"{target}_{source}"
-        reverse_quote = self._fresh_quote(
-            cached_rates,
-            reverse_key,
-            target,
-            source,
-            now,
-        )
-        if reverse_quote is not None:
-            quote = RateQuote(
-                source,
-                target,
-                1.0 / reverse_quote.rate,
-                reverse_quote.updated_at,
-                reverse_quote.source,
-            )
-            self._cache_quote(cached_rates, quote)
-            return quote
+                reverse_key = f"{target}_{source}"
+                reverse_quote = self._fresh_quote(
+                    cached_rates,
+                    reverse_key,
+                    target,
+                    source,
+                    now,
+                )
+                if reverse_quote is not None:
+                    quote = RateQuote(
+                        source,
+                        target,
+                        1.0 / reverse_quote.rate,
+                        reverse_quote.updated_at,
+                        reverse_quote.source,
+                    )
+                    self._cache_quote(cached_rates, quote)
+                    return quote
 
-        rates = resolve_exchange_rates(DEFAULT_EXCHANGE_RATES)
-        if source not in rates or target not in rates:
-            raise RateUnavailableError(f"Курс {source}→{target} недоступен.")
-        quote = RateQuote(
-            source,
-            target,
-            rates[source] / rates[target],
-            now,
-            "LocalStub",
-        )
-        self._cache_quote(cached_rates, quote)
-        return quote
+                rates = resolve_exchange_rates(DEFAULT_EXCHANGE_RATES)
+                if source not in rates or target not in rates:
+                    raise ApiRequestError(
+                        f"курс {source}→{target} отсутствует в кеше и заглушке"
+                    )
+                quote = RateQuote(
+                    source,
+                    target,
+                    rates[source] / rates[target],
+                    now,
+                    "LocalStub",
+                )
+                self._cache_quote(cached_rates, quote)
+                return quote
+        except ApiRequestError:
+            raise
+        except (OSError, ValueError) as error:
+            raise ApiRequestError(f"не удалось обновить кеш курсов: {error}") from error
 
     def ensure_authenticated(self) -> User:
         """Return the active user or raise when no session is logged in."""
         return self._require_user()
 
-    def show_portfolio(self, base_currency: str = "USD") -> PortfolioReport:
+    def show_portfolio(self, base_currency: str | None = None) -> PortfolioReport:
         """Load the current user's portfolio and value each wallet."""
         user = self._require_user()
-        base = normalize_currency_code(base_currency)
-        try:
-            self.get_rate(base, "USD")
-        except RateUnavailableError as error:
-            raise UnknownCurrencyError(base) from error
+        base_currency = base_currency or self.settings.get(
+            "default_base_currency",
+            "USD",
+        )
+        base = get_currency(base_currency).code
+        self.get_rate(base, "USD")
 
         portfolio = self._load_portfolio(user)
         lines: list[PortfolioLine] = []
@@ -256,17 +301,28 @@ class WalletService:
             total_value=sum(line.value for line in lines),
         )
 
-    def buy(self, currency_code: str, amount: int | float) -> TradeReport:
+    @log_action("BUY", verbose=True)
+    def buy(
+        self,
+        currency_code: str,
+        amount: int | float,
+        *,
+        user_id: int | None = None,
+    ) -> TradeReport:
         """Buy currency for the current user and persist the new balance."""
-        user = self._require_user()
-        code = normalize_currency_code(currency_code)
+        with self.storage.transaction():
+            return self._buy(currency_code, amount, user_id)
+
+    def _buy(
+        self,
+        currency_code: str,
+        amount: int | float,
+        user_id: int | None,
+    ) -> TradeReport:
+        user = self._require_user(user_id)
+        code = get_currency(currency_code).code
         quantity = validate_amount(amount)
-        try:
-            quote = self.get_rate(code, "USD")
-        except RateUnavailableError as error:
-            raise RateUnavailableError(
-                f"Не удалось получить курс для {code}→USD."
-            ) from error
+        quote = self.get_rate(code, "USD")
 
         portfolio = self._load_portfolio(user)
         wallet = portfolio.wallets.get(code)
@@ -289,10 +345,26 @@ class WalletService:
             estimated_value_usd=estimated_value,
         )
 
-    def sell(self, currency_code: str, amount: int | float) -> TradeReport:
+    @log_action("SELL", verbose=True)
+    def sell(
+        self,
+        currency_code: str,
+        amount: int | float,
+        *,
+        user_id: int | None = None,
+    ) -> TradeReport:
         """Sell currency for the current user and persist the new balances."""
-        user = self._require_user()
-        code = normalize_currency_code(currency_code)
+        with self.storage.transaction():
+            return self._sell(currency_code, amount, user_id)
+
+    def _sell(
+        self,
+        currency_code: str,
+        amount: int | float,
+        user_id: int | None,
+    ) -> TradeReport:
+        user = self._require_user(user_id)
+        code = get_currency(currency_code).code
         quantity = validate_amount(amount)
         portfolio = self._load_portfolio(user)
         try:
@@ -301,12 +373,7 @@ class WalletService:
             raise WalletNotFoundError(code) from error
         if quantity > wallet.balance:
             raise InsufficientFundsError(code, wallet.balance, quantity)
-        try:
-            quote = self.get_rate(code, "USD")
-        except RateUnavailableError as error:
-            raise RateUnavailableError(
-                f"Не удалось получить курс для {code}→USD."
-            ) from error
+        quote = self.get_rate(code, "USD")
 
         previous_balance = wallet.balance
         estimated_value = sell_currency(
@@ -326,21 +393,28 @@ class WalletService:
             estimated_value_usd=estimated_value,
         )
 
-    def _require_user(self) -> User:
-        if self._current_user_id is None:
+    def _require_user(self, user_id: int | None = None) -> User:
+        selected_user_id = self._current_user_id if user_id is None else user_id
+        if selected_user_id is None:
             raise NotAuthenticatedError("Сначала выполните login")
+        if (
+            self._current_user_id is not None
+            and selected_user_id != self._current_user_id
+        ):
+            raise NotAuthenticatedError(
+                "Нельзя выполнить операцию от имени другого пользователя"
+            )
         users = self.storage.load_users()
         user = next(
-            (
-                candidate
-                for candidate in users
-                if candidate.user_id == self._current_user_id
-            ),
+            (candidate for candidate in users if candidate.user_id == selected_user_id),
             None,
         )
         if user is None:
-            self._current_user_id = None
-            raise NotAuthenticatedError("Сначала выполните login")
+            if selected_user_id == self._current_user_id:
+                self._current_user_id = None
+                self._current_username = None
+                raise NotAuthenticatedError("Сначала выполните login")
+            raise UserNotFoundError(str(selected_user_id))
         return user
 
     def _load_portfolio(self, user: User) -> Portfolio:

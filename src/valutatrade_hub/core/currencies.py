@@ -129,7 +129,10 @@ def get_currency(code: str) -> Currency:
 
     Unknown but syntactically valid tickers raise ``CurrencyNotFoundError``.
     """
-    normalized_code = normalize_currency_code(code)
+    try:
+        normalized_code = normalize_currency_code(code)
+    except (TypeError, ValueError) as error:
+        raise CurrencyNotFoundError(str(code)) from error
     try:
         return copy(_CURRENCY_REGISTRY[normalized_code])
     except KeyError as error:
@@ -143,3 +146,8 @@ def register_currency(currency: Currency, *, replace: bool = False) -> None:
     if currency.code in _CURRENCY_REGISTRY and not replace:
         raise ValueError(f"Валюта {currency.code} уже есть в реестре.")
     _CURRENCY_REGISTRY[currency.code] = copy(currency)
+
+
+def supported_currency_codes() -> tuple[str, ...]:
+    """Return the registered currency codes in registry display order."""
+    return tuple(_CURRENCY_REGISTRY)
