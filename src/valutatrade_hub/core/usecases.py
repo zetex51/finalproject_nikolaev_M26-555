@@ -25,7 +25,6 @@ from valutatrade_hub.core.utils import (
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
-from valutatrade_hub.services.parser import ParserService
 
 
 @dataclass(frozen=True)
@@ -37,6 +36,7 @@ class RateQuote:
     rate: float
     updated_at: datetime
     source: str
+    cached_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -144,14 +144,9 @@ class WalletService:
 
     RATE_TTL = timedelta(minutes=5)
 
-    def __init__(
-        self,
-        storage: JsonStorage | DatabaseManager | None = None,
-        parser_service: ParserService | None = None,
-    ) -> None:
+    def __init__(self, storage: JsonStorage | DatabaseManager | None = None) -> None:
         self.settings = SettingsLoader()
         self.storage = DatabaseManager() if storage is None else storage
-        self.parser_service = parser_service or ParserService(self.settings)
         self.RATE_TTL = timedelta(seconds=self.settings.get("rates_ttl_seconds", 300))
         self._current_user_id: int | None = None
         self._current_username: str | None = None
@@ -212,7 +207,7 @@ class WalletService:
 
     @log_action("GET_RATE", verbose=True)
     def get_rate(self, from_currency: str, to_currency: str) -> RateQuote:
-        """Return a fresh cached rate or refresh it through the parser service."""
+        """Return a fresh quote from the local rate cache."""
         source = get_currency(from_currency).code
         target = get_currency(to_currency).code
         now = datetime.now(timezone.utc)
@@ -248,6 +243,44 @@ class WalletService:
                         1.0 / reverse_quote.rate,
                         reverse_quote.updated_at,
                         reverse_quote.source,
+                        reverse_quote.cached_at,
+                    )
+                    self._cache_quote(cached_rates, quote)
+                    return quote
+
+                source_usd_quote = self._fresh_usd_quote(cached_rates, source, now)
+                target_usd_quote = self._fresh_usd_quote(cached_rates, target, now)
+                if source_usd_quote is not None and target_usd_quote is not None:
+                    quote_rate = validate_amount(
+                        source_usd_quote.rate / target_usd_quote.rate
+                    )
+                    providers = dict.fromkeys(
+                        provider
+                        for usd_quote in (source_usd_quote, target_usd_quote)
+                        for provider in usd_quote.source.split("+")
+                        if provider != "Identity"
+                    )
+                    quote_source = "+".join(providers) if providers else "Identity"
+                    timestamps = [
+                        usd_quote.updated_at
+                        for usd_quote in (source_usd_quote, target_usd_quote)
+                        if usd_quote.source != "Identity"
+                    ]
+                    quote_updated_at = (
+                        min(timestamps) if timestamps else datetime.now(timezone.utc)
+                    )
+                    cache_timestamps = [
+                        usd_quote.cached_at or usd_quote.updated_at
+                        for usd_quote in (source_usd_quote, target_usd_quote)
+                        if usd_quote.source != "Identity"
+                    ]
+                    quote = RateQuote(
+                        source,
+                        target,
+                        quote_rate,
+                        quote_updated_at,
+                        quote_source,
+                        min(cache_timestamps) if cache_timestamps else None,
                     )
                     self._cache_quote(cached_rates, quote)
                     return quote
@@ -255,36 +288,10 @@ class WalletService:
             raise ApiRequestError(
                 f"не удалось прочитать кеш курсов: {error}"
             ) from error
-
-        parsed_quote = self.parser_service.get_rate(source, target)
-        quote = RateQuote(
-            parsed_quote.from_currency,
-            parsed_quote.to_currency,
-            parsed_quote.rate,
-            parsed_quote.updated_at,
-            parsed_quote.source,
+        raise RateUnavailableError(
+            f"Курс {source}→{target} отсутствует или устарел в локальном кеше. "
+            "Выполните update-rates."
         )
-        try:
-            with self.storage.transaction():
-                cached_rates = self._load_rates_safely()
-                # Another caller may have refreshed the pair while the network
-                # request was in flight. Prefer that quote if it is still fresh.
-                refreshed_at = datetime.now(timezone.utc)
-                cached_quote = self._fresh_quote(
-                    cached_rates,
-                    pair_key,
-                    source,
-                    target,
-                    refreshed_at,
-                )
-                if cached_quote is not None:
-                    return cached_quote
-                self._cache_quote(cached_rates, quote)
-                return quote
-        except (OSError, ValueError) as error:
-            raise ApiRequestError(
-                f"не удалось сохранить кеш курсов: {error}"
-            ) from error
 
     def ensure_authenticated(self) -> User:
         """Return the active user or raise when no session is logged in."""
@@ -502,7 +509,49 @@ class WalletService:
         if now - cached_at > self.RATE_TTL:
             return None
         source = entry.get("source", rates.get("source", "RateCache"))
-        return RateQuote(from_currency, to_currency, rate, updated_at, str(source))
+        return RateQuote(
+            from_currency,
+            to_currency,
+            rate,
+            updated_at,
+            str(source),
+            cached_at,
+        )
+
+    def _fresh_usd_quote(
+        self,
+        rates: Mapping[str, object],
+        currency_code: str,
+        now: datetime,
+    ) -> RateQuote | None:
+        if currency_code == "USD":
+            return RateQuote("USD", "USD", 1.0, now, "Identity")
+        direct_quote = self._fresh_quote(
+            rates,
+            f"{currency_code}_USD",
+            currency_code,
+            "USD",
+            now,
+        )
+        if direct_quote is not None:
+            return direct_quote
+        reverse_quote = self._fresh_quote(
+            rates,
+            f"USD_{currency_code}",
+            "USD",
+            currency_code,
+            now,
+        )
+        if reverse_quote is None:
+            return None
+        return RateQuote(
+            currency_code,
+            "USD",
+            1.0 / reverse_quote.rate,
+            reverse_quote.updated_at,
+            reverse_quote.source,
+            reverse_quote.cached_at,
+        )
 
     def _load_rates_safely(self) -> dict[str, object]:
         try:
@@ -512,7 +561,8 @@ class WalletService:
 
     def _cache_quote(self, rates: dict[str, object], quote: RateQuote) -> None:
         updated_at = quote.updated_at.isoformat()
-        cached_at = datetime.now(timezone.utc).isoformat()
+        cache_timestamp = quote.cached_at or datetime.now(timezone.utc)
+        cached_at = cache_timestamp.isoformat()
         rates[f"{quote.from_currency}_{quote.to_currency}"] = {
             "rate": quote.rate,
             "updated_at": updated_at,

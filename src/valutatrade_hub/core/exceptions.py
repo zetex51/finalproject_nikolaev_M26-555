@@ -38,7 +38,7 @@ class ApiRequestError(RuntimeError):
 
 
 class RateUnavailableError(ValueError):
-    """Raised when neither the rate cache nor the local stub has a quote."""
+    """Raised when the local Core rate cache has no fresh quote."""
 
 
 class WalletNotFoundError(ValueError):

@@ -20,6 +20,7 @@ class SettingsLoader:
         "data_dir": "data",
         "rates_ttl_seconds": 300,
         "rates_timeout_seconds": 10,
+        "rates_update_interval_seconds": 240,
         "default_base_currency": "USD",
         "log_file": "logs/actions.log",
         "log_format": "%(levelname)s %(asctime)s %(message)s",
@@ -87,6 +88,15 @@ class SettingsLoader:
                 raise ValueError(
                     "VALUTATRADE_RATES_TIMEOUT_SECONDS должен быть числом."
                 ) from error
+        update_interval = os.environ.get("VALUTATRADE_RATES_UPDATE_INTERVAL_SECONDS")
+        if update_interval is not None:
+            try:
+                values["rates_update_interval_seconds"] = int(update_interval)
+            except ValueError as error:
+                raise ValueError(
+                    "VALUTATRADE_RATES_UPDATE_INTERVAL_SECONDS "
+                    "должен быть целым числом."
+                ) from error
         values.update(
             {key: value for key, value in environment_values.items() if value}
         )
@@ -106,6 +116,15 @@ class SettingsLoader:
             or timeout <= 0
         ):
             raise ValueError("rates_timeout_seconds должен быть положительным числом.")
+        update_interval = values.get("rates_update_interval_seconds")
+        if (
+            not isinstance(update_interval, int)
+            or isinstance(update_interval, bool)
+            or update_interval <= 0
+        ):
+            raise ValueError(
+                "rates_update_interval_seconds должен быть положительным целым числом."
+            )
         if not isinstance(values.get("default_base_currency"), str):
             raise ValueError("default_base_currency должен быть строкой.")
         self._values = values

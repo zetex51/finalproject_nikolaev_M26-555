@@ -18,13 +18,19 @@ from valutatrade_hub.core.usecases import (
     WalletNotFoundError,
     WalletService,
 )
+from valutatrade_hub.parser_service.updater import RateUpdater
 
 
 class WalletApplication:
     """Own the console loop and dispatch user commands to core use cases."""
 
-    def __init__(self, service: WalletService | None = None) -> None:
+    def __init__(
+        self,
+        service: WalletService | None = None,
+        rate_updater: RateUpdater | None = None,
+    ) -> None:
         self.service = service or WalletService()
+        self.rate_updater = rate_updater or RateUpdater()
 
     def run(self) -> None:
         """Read and process commands until the user exits."""
@@ -64,6 +70,7 @@ class WalletApplication:
             "buy": self._buy,
             "sell": self._sell,
             "get-rate": self._get_rate,
+            "update-rates": self._update_rates,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -133,6 +140,9 @@ class WalletApplication:
         except UnknownCurrencyError:
             print(f"Неизвестная базовая валюта '{(base_currency or 'USD').upper()}'")
             return
+        except RateUnavailableError as error:
+            print(error)
+            return
 
         print(
             f"Портфель пользователя '{report.username}' (база: {report.base_currency}):"
@@ -183,7 +193,7 @@ class WalletApplication:
             return
         except RateUnavailableError:
             code = currency_code.strip().upper()
-            print(f"Не удалось получить курс для {code}→USD")
+            print(f"Не удалось получить курс для {code}→USD. Выполните update-rates.")
             return
 
         self._print_trade(report, purchase=True)
@@ -223,7 +233,7 @@ class WalletApplication:
             return
         except RateUnavailableError:
             code = currency_code.strip().upper()
-            print(f"Не удалось получить курс для {code}→USD")
+            print(f"Не удалось получить курс для {code}→USD. Выполните update-rates.")
             return
 
         self._print_trade(report, purchase=False)
@@ -245,7 +255,7 @@ class WalletApplication:
             self._print_api_error(error)
             return
         except RateUnavailableError as error:
-            self._print_api_error(ApiRequestError(str(error)))
+            print(error)
             return
 
         updated_at = quote.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -274,6 +284,25 @@ class WalletApplication:
         print("Изменения в портфеле:")
         print(f"- {report.currency_code}: было {previous} → стало {current}")
         print(f"Оценочная {estimate_label}: {report.estimated_value_usd:,.2f} USD")
+
+    def _update_rates(self, arguments: list[str]) -> None:
+        if arguments:
+            raise ValueError("Команда update-rates не принимает аргументы.")
+        try:
+            report = self.rate_updater.update_rates()
+        except ApiRequestError as error:
+            self._print_api_error(error)
+            return
+
+        status = "завершено частично" if report.errors else "завершено"
+        print(
+            f"Обновление курсов {status}: "
+            f"курсов в кеше — {report.cache_quotes_updated}, "
+            f"новых записей истории — {report.history_records_added}, "
+            f"повторных записей — {report.history_records_skipped}."
+        )
+        for reason in report.errors:
+            self._print_api_error(ApiRequestError(reason))
 
     @staticmethod
     def _parse_options(
@@ -344,6 +373,7 @@ class WalletApplication:
             "  buy --currency <валюта> --amount <количество>\n"
             "  sell --currency <валюта> --amount <количество>\n"
             "  get-rate --from <валюта> --to <валюта>\n"
+            "  update-rates\n"
             "  help\n"
             "  exit"
         )

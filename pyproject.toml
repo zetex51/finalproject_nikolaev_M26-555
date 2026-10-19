@@ -8,6 +8,7 @@ dependencies = ["prettytable>=3.18.0"]
 
 [project.scripts]
 wallet = "valutatrade_hub.cli.interface:main"
+wallet-rate-scheduler = "valutatrade_hub.parser_service.scheduler:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
@@ -28,6 +29,7 @@ select = ["E", "F", "I"]
 data_dir = "data"
 rates_ttl_seconds = 300
 rates_timeout_seconds = 10
+rates_update_interval_seconds = 240
 default_base_currency = "USD"
 log_file = "logs/actions.log"
 log_format = "%(levelname)s %(asctime)s %(message)s"

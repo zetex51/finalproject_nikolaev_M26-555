@@ -12,7 +12,8 @@ PASSWORD_MIN_LENGTH = 4
 _CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z0-9]{2,5}$")
 
 # Demonstration values expressed as USD per one unit of the named currency.
-# Local fiat rates keep the CLI usable when no ExchangeRate-API key is set.
+# Demonstration values for standalone model helpers. Parser Service never stores
+# these as measurements from an external provider.
 DEFAULT_EXCHANGE_RATES = MappingProxyType(
     {
         "USD": 1.0,
