@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +11,8 @@ from threading import RLock
 from typing import Any, Iterator
 
 from valutatrade_hub.core.models import Portfolio, User
+
+_RATE_PAIR_KEY = re.compile(r"^[A-Z0-9]{2,5}_[A-Z0-9]{2,5}$")
 
 
 class JsonStorage:
@@ -35,7 +38,7 @@ class JsonStorage:
             for path, default in (
                 (self.users_path, []),
                 (self.portfolios_path, []),
-                (self.rates_path, {}),
+                (self.rates_path, {"pairs": {}, "last_refresh": None}),
             ):
                 if not path.exists():
                     self._write_json(path, default)
@@ -79,14 +82,62 @@ class JsonStorage:
             )
 
     def load_rates(self) -> dict[str, Any]:
-        """Load the cached pair rates and refresh metadata."""
+        """Load rates using the current snapshot schema.
+
+        Flat caches from previous versions are normalized in memory. Their
+        ``cached_at`` timestamp becomes the pair's ``updated_at`` value so the
+        existing cache TTL continues to reflect when the value was fetched.
+        """
         with self._lock:
-            return self._read_json(self.rates_path, dict)
+            return self._normalize_rates(self._read_json(self.rates_path, dict))
 
     def save_rates(self, rates: Mapping[str, Any]) -> None:
-        """Persist cached rates and refresh metadata."""
+        """Persist a normalized ``pairs`` snapshot and refresh timestamp."""
         with self._lock:
-            self._write_json(self.rates_path, dict(rates))
+            self._write_json(self.rates_path, self._normalize_rates(rates))
+
+    @staticmethod
+    def _normalize_rates(rates: Mapping[str, Any]) -> dict[str, Any]:
+        """Return the ``pairs`` snapshot shape and discard legacy metadata."""
+        nested_pairs = rates.get("pairs")
+        if "pairs" not in rates:
+            legacy = True
+            pairs = {
+                key: value
+                for key, value in rates.items()
+                if isinstance(key, str) and _RATE_PAIR_KEY.fullmatch(key)
+            }
+        elif isinstance(nested_pairs, Mapping):
+            legacy = False
+            pairs = nested_pairs
+        else:
+            raise ValueError("Поле 'pairs' в rates.json должно быть объектом.")
+
+        normalized_pairs: dict[str, dict[str, Any]] = {}
+        for key, value in pairs.items():
+            if (
+                not isinstance(key, str)
+                or not _RATE_PAIR_KEY.fullmatch(key)
+                or not isinstance(value, Mapping)
+            ):
+                continue
+            updated_at = value.get("updated_at")
+            if legacy and isinstance(value.get("cached_at"), str):
+                updated_at = value["cached_at"]
+            normalized_pairs[key] = {
+                field: field_value
+                for field, field_value in (
+                    ("rate", value.get("rate")),
+                    ("updated_at", updated_at),
+                    ("source", value.get("source")),
+                )
+                if field_value is not None
+            }
+
+        return {
+            "pairs": normalized_pairs,
+            "last_refresh": rates.get("last_refresh"),
+        }
 
     @staticmethod
     def _read_json(path: Path, expected_type: type) -> Any:

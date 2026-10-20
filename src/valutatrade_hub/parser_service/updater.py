@@ -121,7 +121,7 @@ class RateUpdater:
             )
             raise
         self._log_history_writes(records, previous_ids)
-        self._update_core_cache(samples)
+        cache_quotes_updated = self._update_core_cache(samples)
 
         elapsed_ms = round((time.perf_counter() - started_at) * 1000)
         result = "PARTIAL" if errors else "OK"
@@ -132,13 +132,13 @@ class RateUpdater:
             len(samples),
             added,
             skipped,
-            len(samples),
+            cache_quotes_updated,
             elapsed_ms,
         )
         return UpdateReport(
             history_records_added=added,
             history_records_skipped=skipped,
-            cache_quotes_updated=len(samples),
+            cache_quotes_updated=cache_quotes_updated,
             elapsed_ms=elapsed_ms,
             errors=tuple(errors),
         )
@@ -180,32 +180,40 @@ class RateUpdater:
                 status,
             )
 
-    def _update_core_cache(self, samples: list[RateSample]) -> None:
-        cached_at = datetime.now(timezone.utc).isoformat()
+    def _update_core_cache(self, samples: list[RateSample]) -> int:
+        refreshed_at = datetime.now(timezone.utc)
+        updated_at = refreshed_at.isoformat().replace("+00:00", "Z")
+        updated_pairs = 0
         try:
             with self.database.transaction():
                 try:
                     rates = self.database.load_rates()
                 except (OSError, ValueError):
-                    rates = {}
+                    rates = {"pairs": {}, "last_refresh": None}
+                pairs = rates.get("pairs")
+                if not isinstance(pairs, dict):
+                    pairs = {}
                 for sample in samples:
-                    updated_at = sample.timestamp.astimezone(timezone.utc).isoformat()
                     pair_key = f"{sample.from_currency}_{sample.to_currency}"
                     reverse_key = f"{sample.to_currency}_{sample.from_currency}"
-                    rates[pair_key] = {
-                        "rate": sample.rate,
-                        "updated_at": updated_at,
-                        "cached_at": cached_at,
-                        "source": sample.source,
-                    }
-                    rates[reverse_key] = {
-                        "rate": 1.0 / sample.rate,
-                        "updated_at": updated_at,
-                        "cached_at": cached_at,
-                        "source": sample.source,
-                    }
-                rates["source"] = "ParserService"
-                rates["last_refresh"] = cached_at
+                    updated_pairs += self._store_if_newer(
+                        pairs,
+                        pair_key,
+                        sample.rate,
+                        updated_at,
+                        sample.source,
+                        refreshed_at,
+                    )
+                    updated_pairs += self._store_if_newer(
+                        pairs,
+                        reverse_key,
+                        1.0 / sample.rate,
+                        updated_at,
+                        sample.source,
+                        refreshed_at,
+                    )
+                rates["pairs"] = pairs
+                rates["last_refresh"] = updated_at
                 self.database.save_rates(rates)
         except (OSError, ValueError) as error:
             self.logger.error(
@@ -214,3 +222,39 @@ class RateUpdater:
                 error,
             )
             raise ApiRequestError(f"не удалось обновить rates.json: {error}") from error
+        return updated_pairs
+
+    @staticmethod
+    def _store_if_newer(
+        pairs: dict[str, object],
+        key: str,
+        rate: float,
+        updated_at: str,
+        source: str,
+        refreshed_at: datetime,
+    ) -> int:
+        """Replace a cached pair only when the incoming timestamp is newer."""
+        current = pairs.get(key)
+        if isinstance(current, dict):
+            value = current.get("updated_at")
+            if isinstance(value, str):
+                try:
+                    current_timestamp = datetime.fromisoformat(
+                        value.replace("Z", "+00:00")
+                    )
+                    if current_timestamp.tzinfo is None:
+                        current_timestamp = current_timestamp.replace(
+                            tzinfo=timezone.utc
+                        )
+                    else:
+                        current_timestamp = current_timestamp.astimezone(timezone.utc)
+                except ValueError:
+                    current_timestamp = None
+                if current_timestamp is not None and current_timestamp >= refreshed_at:
+                    return 0
+        pairs[key] = {
+            "rate": rate,
+            "updated_at": updated_at,
+            "source": source,
+        }
+        return 1

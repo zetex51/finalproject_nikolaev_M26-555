@@ -36,7 +36,6 @@ class RateQuote:
     rate: float
     updated_at: datetime
     source: str
-    cached_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -219,8 +218,11 @@ class WalletService:
         try:
             with self.storage.transaction():
                 cached_rates = self._load_rates_safely()
+                cached_pairs = cached_rates.get("pairs", {})
+                if not isinstance(cached_pairs, Mapping):
+                    cached_pairs = {}
                 cached_quote = self._fresh_quote(
-                    cached_rates,
+                    cached_pairs,
                     pair_key,
                     source,
                     target,
@@ -230,7 +232,7 @@ class WalletService:
                     return cached_quote
 
                 reverse_quote = self._fresh_quote(
-                    cached_rates,
+                    cached_pairs,
                     reverse_key,
                     target,
                     source,
@@ -243,13 +245,12 @@ class WalletService:
                         1.0 / reverse_quote.rate,
                         reverse_quote.updated_at,
                         reverse_quote.source,
-                        reverse_quote.cached_at,
                     )
                     self._cache_quote(cached_rates, quote)
                     return quote
 
-                source_usd_quote = self._fresh_usd_quote(cached_rates, source, now)
-                target_usd_quote = self._fresh_usd_quote(cached_rates, target, now)
+                source_usd_quote = self._fresh_usd_quote(cached_pairs, source, now)
+                target_usd_quote = self._fresh_usd_quote(cached_pairs, target, now)
                 if source_usd_quote is not None and target_usd_quote is not None:
                     quote_rate = validate_amount(
                         source_usd_quote.rate / target_usd_quote.rate
@@ -269,18 +270,12 @@ class WalletService:
                     quote_updated_at = (
                         min(timestamps) if timestamps else datetime.now(timezone.utc)
                     )
-                    cache_timestamps = [
-                        usd_quote.cached_at or usd_quote.updated_at
-                        for usd_quote in (source_usd_quote, target_usd_quote)
-                        if usd_quote.source != "Identity"
-                    ]
                     quote = RateQuote(
                         source,
                         target,
                         quote_rate,
                         quote_updated_at,
                         quote_source,
-                        min(cache_timestamps) if cache_timestamps else None,
                     )
                     self._cache_quote(cached_rates, quote)
                     return quote
@@ -494,28 +489,24 @@ class WalletService:
         try:
             rate = validate_amount(entry["rate"])
             updated_at_value = entry["updated_at"]
-            updated_at = datetime.fromisoformat(updated_at_value)
+            if not isinstance(updated_at_value, str):
+                return None
+            updated_at = datetime.fromisoformat(updated_at_value.replace("Z", "+00:00"))
         except (KeyError, TypeError, ValueError):
             return None
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
-        cache_time_value = entry.get("cached_at", updated_at_value)
-        try:
-            cached_at = datetime.fromisoformat(cache_time_value)
-        except (TypeError, ValueError):
-            cached_at = updated_at
-        if cached_at.tzinfo is None:
-            cached_at = cached_at.replace(tzinfo=timezone.utc)
-        if now - cached_at > self.RATE_TTL:
+        else:
+            updated_at = updated_at.astimezone(timezone.utc)
+        if now - updated_at > self.RATE_TTL:
             return None
-        source = entry.get("source", rates.get("source", "RateCache"))
+        source = entry.get("source", "RateCache")
         return RateQuote(
             from_currency,
             to_currency,
             rate,
             updated_at,
             str(source),
-            cached_at,
         )
 
     def _fresh_usd_quote(
@@ -550,7 +541,6 @@ class WalletService:
             1.0 / reverse_quote.rate,
             reverse_quote.updated_at,
             reverse_quote.source,
-            reverse_quote.cached_at,
         )
 
     def _load_rates_safely(self) -> dict[str, object]:
@@ -560,21 +550,44 @@ class WalletService:
             return {}
 
     def _cache_quote(self, rates: dict[str, object], quote: RateQuote) -> None:
-        updated_at = quote.updated_at.isoformat()
-        cache_timestamp = quote.cached_at or datetime.now(timezone.utc)
-        cached_at = cache_timestamp.isoformat()
-        rates[f"{quote.from_currency}_{quote.to_currency}"] = {
-            "rate": quote.rate,
-            "updated_at": updated_at,
-            "cached_at": cached_at,
-            "source": quote.source,
+        pairs = rates.get("pairs")
+        if not isinstance(pairs, dict):
+            pairs = {}
+        updated_at = (
+            quote.updated_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        candidates = {
+            f"{quote.from_currency}_{quote.to_currency}": {
+                "rate": quote.rate,
+                "updated_at": updated_at,
+                "source": quote.source,
+            },
+            f"{quote.to_currency}_{quote.from_currency}": {
+                "rate": 1.0 / quote.rate,
+                "updated_at": updated_at,
+                "source": quote.source,
+            },
         }
-        rates[f"{quote.to_currency}_{quote.from_currency}"] = {
-            "rate": 1.0 / quote.rate,
-            "updated_at": updated_at,
-            "cached_at": cached_at,
-            "source": quote.source,
-        }
-        rates["source"] = quote.source
-        rates["last_refresh"] = updated_at
-        self.storage.save_rates(rates)
+        changed = False
+        for key, candidate in candidates.items():
+            current = pairs.get(key)
+            current_timestamp = None
+            if isinstance(current, Mapping):
+                value = current.get("updated_at")
+                if isinstance(value, str):
+                    try:
+                        current_timestamp = datetime.fromisoformat(
+                            value.replace("Z", "+00:00")
+                        )
+                        if current_timestamp.tzinfo is None:
+                            current_timestamp = current_timestamp.replace(
+                                tzinfo=timezone.utc
+                            )
+                    except ValueError:
+                        pass
+            if current_timestamp is None or quote.updated_at > current_timestamp:
+                pairs[key] = candidate
+                changed = True
+        if changed:
+            rates["pairs"] = pairs
+            self.storage.save_rates(rates)
