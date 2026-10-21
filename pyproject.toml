@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Консольное приложение валютного кошелька"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["prettytable>=3.18.0"]
+dependencies = ["prettytable>=3.18.0", "requests>=2.32.0"]
 
 [project.scripts]
 wallet = "valutatrade_hub.cli.interface:main"

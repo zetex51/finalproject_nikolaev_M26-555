@@ -61,13 +61,13 @@ class RateUpdater:
         samples: list[RateSample] = []
         errors: list[str] = []
         providers = (
-            ("ExchangeRate-API", self.exchangerate_client.fetch_usd_rates),
-            ("CoinGecko", self.coingecko_client.fetch_usd_rates),
+            ("ExchangeRate-API", self.exchangerate_client.fetch_samples),
+            ("CoinGecko", self.coingecko_client.fetch_samples),
         )
 
-        for provider, fetch_rates in providers:
+        for provider, fetch_samples in providers:
             try:
-                provider_samples = fetch_rates()
+                provider_samples = fetch_samples()
             except ApiRequestError as error:
                 errors.append(error.reason)
                 self.logger.error(

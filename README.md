@@ -131,7 +131,9 @@ API. TTL применяется к `updated_at` каждой пары и бер�
 соответствия тикеров ID CoinGecko и пути к обоим файлам курсов. Ключи
 `EXCHANGERATE_API_KEY` и `COINGECKO_API_KEY` читаются из окружения; ключ
 ExchangeRate-API не хранится в исходном коде. Таймаут запроса по умолчанию —
-10 секунд.
+10 секунд. `BaseApiClient.fetch_rates()` унифицирует ответ клиентов в словарь
+`{"BTC_USD": 59337.21}`; HTTP-запросы выполняются через `requests`, а сетевые
+ошибки и ответы с неуспешным статусом преобразуются в `ApiRequestError`.
 
 Настройки `data_dir`, `rates_ttl_seconds`, `rates_timeout_seconds`,
 `rates_update_interval_seconds`, `default_base_currency`, а также путь и
