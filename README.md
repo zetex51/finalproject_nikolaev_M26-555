@@ -134,6 +134,10 @@ ExchangeRate-API не хранится в исходном коде. Тайма�
 10 секунд. `BaseApiClient.fetch_rates()` унифицирует ответ клиентов в словарь
 `{"BTC_USD": 59337.21}`; HTTP-запросы выполняются через `requests`, а сетевые
 ошибки и ответы с неуспешным статусом преобразуются в `ApiRequestError`.
+`RatesUpdater.run_update()` последовательно опрашивает клиентов, объединяет
+проверенные курсы и обновляет историю и снимок `rates.json`. Если один источник
+недоступен, Parser Service сохраняет результаты остальных и возвращает отчёт о
+частичном обновлении.
 
 Настройки `data_dir`, `rates_ttl_seconds`, `rates_timeout_seconds`,
 `rates_update_interval_seconds`, `default_base_currency`, а также путь и

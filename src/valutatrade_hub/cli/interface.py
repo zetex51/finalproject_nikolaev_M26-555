@@ -18,7 +18,7 @@ from valutatrade_hub.core.usecases import (
     WalletNotFoundError,
     WalletService,
 )
-from valutatrade_hub.parser_service.updater import RateUpdater
+from valutatrade_hub.parser_service.updater import RatesUpdater
 
 
 class WalletApplication:
@@ -27,10 +27,10 @@ class WalletApplication:
     def __init__(
         self,
         service: WalletService | None = None,
-        rate_updater: RateUpdater | None = None,
+        rate_updater: RatesUpdater | None = None,
     ) -> None:
         self.service = service or WalletService()
-        self.rate_updater = rate_updater or RateUpdater()
+        self.rate_updater = rate_updater or RatesUpdater()
 
     def run(self) -> None:
         """Read and process commands until the user exits."""
@@ -289,7 +289,10 @@ class WalletApplication:
         if arguments:
             raise ValueError("Команда update-rates не принимает аргументы.")
         try:
-            report = self.rate_updater.update_rates()
+            run_update = getattr(self.rate_updater, "run_update", None)
+            if not callable(run_update):
+                run_update = self.rate_updater.update_rates
+            report = run_update()
         except ApiRequestError as error:
             self._print_api_error(error)
             return

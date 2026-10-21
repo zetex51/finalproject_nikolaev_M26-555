@@ -45,6 +45,7 @@ class BaseApiClient(ABC):
 
     def __init__(self, config: ParserConfig) -> None:
         self.config = config
+        self._last_samples: tuple[RateSample, ...] = ()
 
     @abstractmethod
     def fetch_rates(self) -> dict[str, float]:
@@ -71,7 +72,13 @@ class BaseApiClient(ABC):
                     meta={},
                 )
             )
+        self._last_samples = tuple(samples)
         return samples
+
+    @property
+    def last_samples(self) -> tuple[RateSample, ...]:
+        """Return detailed samples from the most recent successful request."""
+        return self._last_samples
 
     def _request_json(
         self,
@@ -148,6 +155,7 @@ class CoinGeckoClient(BaseApiClient):
         """Fetch configured coin IDs and retain metadata for history records."""
         coin_ids = self.config.crypto_ids
         if not coin_ids:
+            self._last_samples = ()
             return []
         params = {
             "ids": ",".join(sorted(coin_ids.values())),
@@ -187,6 +195,7 @@ class CoinGeckoClient(BaseApiClient):
                     meta=_response_meta(response, raw_id=coin_id),
                 )
             )
+        self._last_samples = tuple(samples)
         return samples
 
     def fetch_usd_rates(self) -> list[RateSample]:
@@ -208,6 +217,7 @@ class ExchangeRateApiClient(BaseApiClient):
 
     def fetch_samples(self) -> list[RateSample]:
         """Fetch fiat data and invert the provider's units-per-base rates."""
+        self._last_samples = ()
         api_key = self.config.exchange_rate_api_key
         if not api_key:
             raise ApiRequestError(
@@ -250,6 +260,7 @@ class ExchangeRateApiClient(BaseApiClient):
                     meta=_response_meta(response),
                 )
             )
+        self._last_samples = tuple(samples)
         return samples
 
     def fetch_usd_rates(self) -> list[RateSample]:

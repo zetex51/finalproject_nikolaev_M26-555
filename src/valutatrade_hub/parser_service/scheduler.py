@@ -8,13 +8,13 @@ from threading import Event
 from valutatrade_hub.core.exceptions import ApiRequestError
 from valutatrade_hub.logging_config import configure_logging
 from valutatrade_hub.parser_service.config import ParserConfig
-from valutatrade_hub.parser_service.updater import RateUpdater
+from valutatrade_hub.parser_service.updater import RatesUpdater
 
 
 def run_scheduler(
     interval_seconds: int | None = None,
     *,
-    updater: RateUpdater | None = None,
+    updater: RatesUpdater | None = None,
     stop_event: Event | None = None,
 ) -> None:
     """Update immediately, then repeat until interrupted or stopped."""
@@ -25,14 +25,17 @@ def run_scheduler(
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
         raise ValueError("Интервал обновления должен быть положительным целым числом.")
 
-    service = updater or RateUpdater(config)
+    service = updater or RatesUpdater(config=config)
     logger = configure_logging()
     logger.info("PARSER_SCHEDULER result=START interval_seconds=%d", interval)
     stop = stop_event or Event()
     try:
         while not stop.is_set():
             try:
-                service.update_rates()
+                run_update = getattr(service, "run_update", None)
+                if not callable(run_update):
+                    run_update = service.update_rates
+                run_update()
             except ApiRequestError as error:
                 logger.error(
                     "PARSER_SCHEDULER result=UPDATE_ERROR reason=%s",
