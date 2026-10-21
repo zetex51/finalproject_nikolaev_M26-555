@@ -127,6 +127,12 @@ API. TTL применяется к `updated_at` каждой пары и бер�
 ошибка записывается в `logs/actions.log` и выводится в CLI. Локальная история
 не пополняется фиктивными значениями.
 
+`ParserConfig` хранит URL API, базовую валюту, списки отслеживаемых кодов,
+соответствия тикеров ID CoinGecko и пути к обоим файлам курсов. Ключи
+`EXCHANGERATE_API_KEY` и `COINGECKO_API_KEY` читаются из окружения; ключ
+ExchangeRate-API не хранится в исходном коде. Таймаут запроса по умолчанию —
+10 секунд.
+
 Настройки `data_dir`, `rates_ttl_seconds`, `rates_timeout_seconds`,
 `rates_update_interval_seconds`, `default_base_currency`, а также путь и
 параметры логирования задаются в `[tool.valutatrade]` в `pyproject.toml`.

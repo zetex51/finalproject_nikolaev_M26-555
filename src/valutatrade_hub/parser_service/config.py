@@ -1,69 +1,136 @@
 """Configuration for external rate providers and update scheduling."""
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from valutatrade_hub.core.currencies import (
     CryptoCurrency,
     FiatCurrency,
     get_currency,
-    supported_currency_codes,
 )
 from valutatrade_hub.infra.settings import SettingsLoader
 
-CRYPTO_ID_MAP = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-}
+
+def _environment_value(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
 
 
 @dataclass(frozen=True)
-class ParserServiceConfig:
-    """Resolved paths and safe runtime settings for the parser service."""
+class ParserConfig:
+    """All provider, currency, timeout, and storage settings for the parser."""
 
-    data_dir: Path
-    rates_ttl_seconds: int
-    request_timeout_seconds: float
-    update_interval_seconds: int
-    exchange_rate_api_key: str | None = field(default=None, repr=False)
-    coingecko_api_key: str | None = field(default=None, repr=False)
+    COINGECKO_URL: ClassVar[str] = "https://api.coingecko.com/api/v3/simple/price"
+    COINGECKO_PRO_URL: ClassVar[str] = (
+        "https://pro-api.coingecko.com/api/v3/simple/price"
+    )
+    EXCHANGERATE_API_URL: ClassVar[str] = (
+        "https://v6.exchangerate-api.com/v6/{api_key}/latest/{base_currency}"
+    )
+
+    BASE_FIAT_CURRENCY: ClassVar[str] = "USD"
+    FIAT_CURRENCIES: ClassVar[tuple[str, ...]] = ("EUR", "GBP", "RUB")
+    CRYPTO_CURRENCIES: ClassVar[tuple[str, ...]] = ("BTC", "ETH", "SOL")
+    CRYPTO_ID_MAP: ClassVar[dict[str, str]] = {
+        "BTC": "bitcoin",
+        "ETH": "ethereum",
+        "SOL": "solana",
+    }
+    REQUEST_TIMEOUT: ClassVar[float] = 10
+
+    data_dir: Path = Path("data")
+    rates_ttl_seconds: int = 300
+    request_timeout_seconds: float = REQUEST_TIMEOUT
+    update_interval_seconds: int = 240
+    rates_file_path: Path | None = None
+    history_file_path: Path | None = None
+    exchange_rate_api_key: str | None = field(
+        default_factory=lambda: _environment_value("EXCHANGERATE_API_KEY"),
+        repr=False,
+    )
+    coingecko_api_key: str | None = field(
+        default_factory=lambda: _environment_value("COINGECKO_API_KEY"),
+        repr=False,
+    )
 
     @property
-    def history_path(self) -> Path:
-        """Path to the parser's append-only historical measurements."""
-        return self.data_dir / "exchange_rates.json"
+    def EXCHANGERATE_API_KEY(self) -> str | None:
+        """Environment-provided ExchangeRate-API key (never hard-coded)."""
+        return self.exchange_rate_api_key
+
+    @property
+    def COINGECKO_API_KEY(self) -> str | None:
+        """Optional environment-provided CoinGecko Pro key."""
+        return self.coingecko_api_key
+
+    @property
+    def RATES_FILE_PATH(self) -> Path:
+        """Configured path to the Core Service's current rates snapshot."""
+        return self.rates_cache_path
+
+    @property
+    def HISTORY_FILE_PATH(self) -> Path:
+        """Configured path to the parser's measurement history."""
+        return self.history_path
+
+    def __post_init__(self) -> None:
+        data_dir = Path(self.data_dir)
+        object.__setattr__(self, "data_dir", data_dir)
+        object.__setattr__(
+            self,
+            "rates_file_path",
+            Path(self.rates_file_path)
+            if self.rates_file_path is not None
+            else data_dir / "rates.json",
+        )
+        object.__setattr__(
+            self,
+            "history_file_path",
+            Path(self.history_file_path)
+            if self.history_file_path is not None
+            else data_dir / "exchange_rates.json",
+        )
 
     @property
     def rates_cache_path(self) -> Path:
-        """Path to the latest rates consumed by Core Service."""
-        return self.data_dir / "rates.json"
+        """Path to the current snapshot consumed by Core Service."""
+        return self.rates_file_path or self.data_dir / "rates.json"
+
+    @property
+    def history_path(self) -> Path:
+        """Path to the parser's historical measurements."""
+        return self.history_file_path or self.data_dir / "exchange_rates.json"
 
     @property
     def fiat_codes(self) -> tuple[str, ...]:
-        """Return registered fiat codes that need a USD quote."""
+        """Configured fiat codes present in the application's currency registry."""
         return tuple(
             code
-            for code in supported_currency_codes()
-            if code != "USD" and isinstance(get_currency(code), FiatCurrency)
+            for code in self.FIAT_CURRENCIES
+            if code != self.BASE_FIAT_CURRENCY
+            and isinstance(get_currency(code), FiatCurrency)
         )
 
     @property
     def crypto_ids(self) -> dict[str, str]:
-        """Return configured CoinGecko IDs present in the currency registry."""
+        """Configured CoinGecko IDs present in the currency registry."""
         return {
-            code: coin_id
-            for code, coin_id in CRYPTO_ID_MAP.items()
-            if isinstance(get_currency(code), CryptoCurrency)
+            code: self.CRYPTO_ID_MAP[code]
+            for code in self.CRYPTO_CURRENCIES
+            if code in self.CRYPTO_ID_MAP
+            and isinstance(get_currency(code), CryptoCurrency)
         }
 
     @classmethod
     def from_settings(
         cls,
         settings: SettingsLoader | None = None,
-    ) -> "ParserServiceConfig":
-        """Build a service configuration without putting secrets in TOML."""
+    ) -> ParserConfig:
+        """Build config from project settings and environment-only API secrets."""
         settings = settings or SettingsLoader()
         return cls(
             data_dir=Path(settings.get("data_dir", "data")),
@@ -73,11 +140,8 @@ class ParserServiceConfig:
                 "rates_update_interval_seconds",
                 240,
             ),
-            exchange_rate_api_key=_environment_value("EXCHANGERATE_API_KEY"),
-            coingecko_api_key=_environment_value("COINGECKO_API_KEY"),
         )
 
 
-def _environment_value(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
+# Keep the earlier public name available for integrations using the first version.
+ParserServiceConfig = ParserConfig

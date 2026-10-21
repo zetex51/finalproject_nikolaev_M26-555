@@ -15,7 +15,7 @@ from valutatrade_hub.parser_service.api_clients import (
     ExchangeRateApiClient,
     RateSample,
 )
-from valutatrade_hub.parser_service.config import ParserServiceConfig
+from valutatrade_hub.parser_service.config import ParserConfig
 from valutatrade_hub.parser_service.storage import ExchangeRateStorage
 
 
@@ -35,7 +35,7 @@ class RateUpdater:
 
     def __init__(
         self,
-        config: ParserServiceConfig | None = None,
+        config: ParserConfig | None = None,
         *,
         coingecko_client: CoinGeckoClient | None = None,
         exchangerate_client: ExchangeRateApiClient | None = None,
@@ -43,7 +43,7 @@ class RateUpdater:
         database: DatabaseManager | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        self.config = config or ParserServiceConfig.from_settings()
+        self.config = config or ParserConfig.from_settings()
         self.coingecko_client = coingecko_client or CoinGeckoClient(self.config)
         self.exchangerate_client = exchangerate_client or ExchangeRateApiClient(
             self.config

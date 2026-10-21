@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from valutatrade_hub.core.exceptions import ApiRequestError
-from valutatrade_hub.parser_service.config import ParserServiceConfig
+from valutatrade_hub.parser_service.config import ParserConfig
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class _ApiResponse:
 class _JsonApiClient:
     """Common timed JSON request and response validation."""
 
-    def __init__(self, config: ParserServiceConfig) -> None:
+    def __init__(self, config: ParserConfig) -> None:
         self.config = config
 
     def _request_json(
@@ -90,9 +90,6 @@ class _JsonApiClient:
 class CoinGeckoClient(_JsonApiClient):
     """Fetch crypto-to-USD prices in one CoinGecko simple/price request."""
 
-    PUBLIC_URL = "https://api.coingecko.com/api/v3/simple/price"
-    PRO_URL = "https://pro-api.coingecko.com/api/v3/simple/price"
-
     def fetch_usd_rates(self) -> list[RateSample]:
         """Fetch configured coin IDs and return validated measurements."""
         coin_ids = self.config.crypto_ids
@@ -101,7 +98,7 @@ class CoinGeckoClient(_JsonApiClient):
         query = urlencode(
             {
                 "ids": ",".join(sorted(coin_ids.values())),
-                "vs_currencies": "usd",
+                "vs_currencies": self.config.BASE_FIAT_CURRENCY.lower(),
                 "include_last_updated_at": "true",
             }
         )
@@ -110,7 +107,11 @@ class CoinGeckoClient(_JsonApiClient):
             if self.config.coingecko_api_key
             else {}
         )
-        base_url = self.PRO_URL if self.config.coingecko_api_key else self.PUBLIC_URL
+        base_url = (
+            self.config.COINGECKO_PRO_URL
+            if self.config.coingecko_api_key
+            else self.config.COINGECKO_URL
+        )
         response = self._request_json(
             f"{base_url}?{query}",
             "CoinGecko",
@@ -122,12 +123,16 @@ class CoinGeckoClient(_JsonApiClient):
             coin_data = response.payload.get(coin_id)
             if not isinstance(coin_data, Mapping):
                 raise ApiRequestError(f"CoinGecko: нет данных для {code} ({coin_id})")
-            rate = _positive_rate(coin_data.get("usd"), "CoinGecko", code)
+            rate = _positive_rate(
+                coin_data.get(self.config.BASE_FIAT_CURRENCY.lower()),
+                "CoinGecko",
+                code,
+            )
             timestamp = _parse_timestamp(coin_data.get("last_updated_at"))
             samples.append(
                 RateSample(
                     from_currency=code,
-                    to_currency="USD",
+                    to_currency=self.config.BASE_FIAT_CURRENCY,
                     rate=rate,
                     timestamp=timestamp,
                     source="CoinGecko",
@@ -140,8 +145,6 @@ class CoinGeckoClient(_JsonApiClient):
 class ExchangeRateApiClient(_JsonApiClient):
     """Fetch fiat rates relative to USD from ExchangeRate-API."""
 
-    BASE_URL = "https://v6.exchangerate-api.com/v6"
-
     def fetch_usd_rates(self) -> list[RateSample]:
         """Return fiat-to-USD samples; the provider's USD rates are inverted."""
         if not self.config.exchange_rate_api_key:
@@ -149,16 +152,22 @@ class ExchangeRateApiClient(_JsonApiClient):
                 "ExchangeRate-API: задайте EXCHANGERATE_API_KEY для обновления фиата"
             )
         encoded_key = quote(self.config.exchange_rate_api_key, safe="")
+        base_currency = self.config.BASE_FIAT_CURRENCY
         response = self._request_json(
-            f"{self.BASE_URL}/{encoded_key}/latest/USD",
+            self.config.EXCHANGERATE_API_URL.format(
+                api_key=encoded_key,
+                base_currency=base_currency,
+            ),
             "ExchangeRate-API",
         )
         payload = response.payload
         if payload.get("result") != "success":
             error_type = payload.get("error-type", "unknown-error")
             raise ApiRequestError(f"ExchangeRate-API: {error_type}")
-        if payload.get("base_code", "USD") != "USD":
-            raise ApiRequestError("ExchangeRate-API: ответ получен не для базы USD")
+        if payload.get("base_code", base_currency) != base_currency:
+            raise ApiRequestError(
+                f"ExchangeRate-API: ответ получен не для базы {base_currency}"
+            )
         rates = payload.get("conversion_rates", payload.get("rates"))
         if not isinstance(rates, Mapping):
             raise ApiRequestError("ExchangeRate-API: в ответе отсутствуют курсы")
@@ -182,7 +191,7 @@ class ExchangeRateApiClient(_JsonApiClient):
             samples.append(
                 RateSample(
                     from_currency=code,
-                    to_currency="USD",
+                    to_currency=base_currency,
                     rate=usd_per_unit,
                     timestamp=timestamp,
                     source="ExchangeRate-API",

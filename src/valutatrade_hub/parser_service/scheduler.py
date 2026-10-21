@@ -7,7 +7,7 @@ from threading import Event
 
 from valutatrade_hub.core.exceptions import ApiRequestError
 from valutatrade_hub.logging_config import configure_logging
-from valutatrade_hub.parser_service.config import ParserServiceConfig
+from valutatrade_hub.parser_service.config import ParserConfig
 from valutatrade_hub.parser_service.updater import RateUpdater
 
 
@@ -18,7 +18,7 @@ def run_scheduler(
     stop_event: Event | None = None,
 ) -> None:
     """Update immediately, then repeat until interrupted or stopped."""
-    config = ParserServiceConfig.from_settings()
+    config = ParserConfig.from_settings()
     interval = (
         config.update_interval_seconds if interval_seconds is None else interval_seconds
     )
