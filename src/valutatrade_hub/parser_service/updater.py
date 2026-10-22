@@ -36,6 +36,8 @@ class UpdateReport:
     cache_quotes_updated: int
     elapsed_ms: int
     errors: tuple[str, ...] = ()
+    rates_fetched: int = 0
+    last_refresh: str | None = None
 
 
 class RatesUpdater:
@@ -60,8 +62,8 @@ class RatesUpdater:
             clients
             if clients is not None
             else (
-                ExchangeRateApiClient(self.config),
                 CoinGeckoClient(self.config),
+                ExchangeRateApiClient(self.config),
             )
         )
         self.storage = storage if storage is not None else DatabaseManager()
@@ -72,15 +74,20 @@ class RatesUpdater:
         )
         self.logger = logger if logger is not None else configure_logging()
 
-    def run_update(self) -> UpdateReport:
+    def run_update(self, source: str | None = None) -> UpdateReport:
         """Fetch all clients sequentially, retaining successful provider data."""
+        clients = self._select_clients(source)
         started_at = time.perf_counter()
-        self.logger.info("PARSER_UPDATE action=UPDATE_RATES result=START")
+        self.logger.info(
+            "PARSER_UPDATE action=UPDATE_RATES source=%s result=START",
+            source or "all",
+        )
         samples: list[RateSample] = []
         errors: list[str] = []
 
-        for client in self.clients:
+        for client in clients:
             provider = self._provider_name(client)
+            self.logger.info("PARSER_PROVIDER provider=%s result=START", provider)
             try:
                 rates = client.fetch_rates()
                 provider_samples = self._samples_from_rates(client, rates)
@@ -146,7 +153,7 @@ class RatesUpdater:
         self._log_history_writes(records, previous_ids)
 
         try:
-            cache_quotes_updated = self._update_core_cache(samples)
+            cache_quotes_updated, last_refresh = self._update_core_cache(samples)
         except ApiRequestError:
             raise
         except Exception as error:
@@ -160,10 +167,10 @@ class RatesUpdater:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000)
         result = "PARTIAL" if errors else "OK"
         self.logger.info(
-            "PARSER_UPDATE action=UPDATE_RATES result=%s samples=%d "
+            "PARSER_UPDATE action=UPDATE_RATES result=%s rates=%d "
             "history_added=%d history_skipped=%d cache_quotes=%d elapsed_ms=%d",
             result,
-            len(samples),
+            len({(sample.from_currency, sample.to_currency) for sample in samples}),
             added,
             skipped,
             cache_quotes_updated,
@@ -175,11 +182,37 @@ class RatesUpdater:
             cache_quotes_updated=cache_quotes_updated,
             elapsed_ms=elapsed_ms,
             errors=tuple(errors),
+            rates_fetched=len(
+                {(sample.from_currency, sample.to_currency) for sample in samples}
+            ),
+            last_refresh=last_refresh,
         )
 
-    def update_rates(self) -> UpdateReport:
+    def update_rates(self, source: str | None = None) -> UpdateReport:
         """Compatibility alias for earlier CLI and scheduler integrations."""
-        return self.run_update()
+        return self.run_update(source=source)
+
+    def _select_clients(self, source: str | None) -> tuple[BaseApiClient, ...]:
+        if source is None:
+            return self.clients
+        normalized = source.strip().lower().replace("-", "").replace("_", "")
+        if normalized not in {"coingecko", "exchangerate"}:
+            raise ValueError("Источник должен быть 'coingecko' или 'exchangerate'.")
+        selected = tuple(
+            client
+            for client in self.clients
+            if self._matches_source(client, normalized)
+        )
+        if not selected:
+            raise ApiRequestError(f"Источник '{source}' не настроен в RatesUpdater.")
+        return selected
+
+    @classmethod
+    def _matches_source(cls, client: BaseApiClient, source: str) -> bool:
+        provider = cls._provider_name(client).lower().replace("-", "").replace("_", "")
+        if source == "coingecko":
+            return "coingecko" in provider
+        return "exchangerate" in provider
 
     @classmethod
     def _samples_from_rates(
@@ -290,7 +323,7 @@ class RatesUpdater:
                 status,
             )
 
-    def _update_core_cache(self, samples: list[RateSample]) -> int:
+    def _update_core_cache(self, samples: list[RateSample]) -> tuple[int, str]:
         refreshed_at = datetime.now(timezone.utc)
         updated_at = refreshed_at.isoformat(timespec="microseconds").replace(
             "+00:00", "Z"
@@ -344,7 +377,7 @@ class RatesUpdater:
             if not callable(save_rates):
                 raise ApiRequestError("storage должен поддерживать save_rates()")
             save_rates(snapshot)
-        return updated_pairs
+        return updated_pairs, updated_at
 
     @staticmethod
     def _store_if_newer(
@@ -397,12 +430,12 @@ class RateUpdater(RatesUpdater):
     ) -> None:
         configured = config or ParserConfig.from_settings()
         clients = (
-            exchangerate_client
-            if exchangerate_client is not None
-            else ExchangeRateApiClient(configured),
             coingecko_client
             if coingecko_client is not None
             else CoinGeckoClient(configured),
+            exchangerate_client
+            if exchangerate_client is not None
+            else ExchangeRateApiClient(configured),
         )
         super().__init__(
             clients=clients,

@@ -1,10 +1,19 @@
 """Interactive command line interface for ValutaTrade Hub."""
 
+import math
+import re
 import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from prettytable import PrettyTable
 
-from valutatrade_hub.core.currencies import supported_currency_codes
+from valutatrade_hub.core.currencies import (
+    CryptoCurrency,
+    get_currency,
+    supported_currency_codes,
+)
 from valutatrade_hub.core.exceptions import ApiRequestError, CurrencyNotFoundError
 from valutatrade_hub.core.usecases import (
     InsufficientFundsError,
@@ -18,7 +27,24 @@ from valutatrade_hub.core.usecases import (
     WalletNotFoundError,
     WalletService,
 )
+from valutatrade_hub.infra.database import DatabaseManager
+from valutatrade_hub.infra.settings import SettingsLoader
 from valutatrade_hub.parser_service.updater import RatesUpdater
+
+_CACHE_PAIR = re.compile(r"^([A-Z0-9]{2,5})_([A-Z0-9]{2,5})$")
+
+
+@dataclass(frozen=True)
+class _RateRow:
+    currency_code: str
+    base_code: str
+    rate: float
+    updated_at: str
+    source: str
+
+    @property
+    def pair(self) -> str:
+        return f"{self.currency_code}_{self.base_code}"
 
 
 class WalletApplication:
@@ -28,9 +54,20 @@ class WalletApplication:
         self,
         service: WalletService | None = None,
         rate_updater: RatesUpdater | None = None,
+        database: DatabaseManager | None = None,
     ) -> None:
-        self.service = service or WalletService()
-        self.rate_updater = rate_updater or RatesUpdater()
+        self.service = service if service is not None else WalletService()
+        self.rate_updater = rate_updater if rate_updater is not None else RatesUpdater()
+        updater_storage = getattr(self.rate_updater, "storage", None)
+        if database is not None:
+            self.database = database
+        elif callable(getattr(updater_storage, "load_rates", None)):
+            self.database = updater_storage
+        else:
+            self.database = DatabaseManager()
+        self.default_base_currency = (
+            str(SettingsLoader().get("default_base_currency", "USD")).strip().upper()
+        )
 
     def run(self) -> None:
         """Read and process commands until the user exits."""
@@ -71,6 +108,7 @@ class WalletApplication:
             "sell": self._sell,
             "get-rate": self._get_rate,
             "update-rates": self._update_rates,
+            "show-rates": self._show_rates,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -286,26 +324,198 @@ class WalletApplication:
         print(f"Оценочная {estimate_label}: {report.estimated_value_usd:,.2f} USD")
 
     def _update_rates(self, arguments: list[str]) -> None:
-        if arguments:
-            raise ValueError("Команда update-rates не принимает аргументы.")
+        options = self._parse_options(arguments, optional={"--source"})
+        source = options.get("--source")
+        if source is not None:
+            source = source.strip().lower()
+            if source not in {"coingecko", "exchangerate"}:
+                raise ValueError(
+                    "Для --source используйте 'coingecko' или 'exchangerate'."
+                )
         try:
             run_update = getattr(self.rate_updater, "run_update", None)
             if not callable(run_update):
                 run_update = self.rate_updater.update_rates
-            report = run_update()
+            report = run_update(source=source) if source else run_update()
         except ApiRequestError as error:
             self._print_api_error(error)
             return
 
         status = "завершено частично" if report.errors else "завершено"
+        rates_fetched = getattr(report, "rates_fetched", report.cache_quotes_updated)
+        last_refresh = getattr(report, "last_refresh", None) or "неизвестно"
         print(
-            f"Обновление курсов {status}: "
-            f"курсов в кеше — {report.cache_quotes_updated}, "
-            f"новых записей истории — {report.history_records_added}, "
-            f"повторных записей — {report.history_records_skipped}."
+            f"Обновление курсов {status}. Источник: {source or 'все'}. "
+            f"Получено курсов — {rates_fetched}, "
+            f"обновлено записей кеша — {report.cache_quotes_updated}. "
+            f"Последнее обновление: {last_refresh}."
         )
         for reason in report.errors:
             self._print_api_error(ApiRequestError(reason))
+
+    def _show_rates(self, arguments: list[str]) -> None:
+        options = self._parse_options(
+            arguments,
+            optional={"--currency", "--top", "--base"},
+        )
+        currency = options.get("--currency")
+        currency = currency.strip().upper() if currency else None
+        base_currency = options.get("--base", self.default_base_currency)
+        base_currency = base_currency.strip().upper()
+
+        try:
+            get_currency(base_currency)
+        except CurrencyNotFoundError:
+            print(f"Неизвестная базовая валюта '{base_currency}'.")
+            return
+
+        top_count: int | None = None
+        if "--top" in options:
+            try:
+                top_count = int(options["--top"])
+            except ValueError as error:
+                raise ValueError(
+                    "Для --top укажите положительное целое число."
+                ) from error
+            if top_count <= 0:
+                raise ValueError("Для --top укажите положительное целое число.")
+
+        try:
+            snapshot = self.database.load_rates()
+        except (OSError, TypeError, ValueError):
+            self._print_empty_rates_cache()
+            return
+
+        pairs = snapshot.get("pairs") if isinstance(snapshot, Mapping) else None
+        if not isinstance(pairs, Mapping) or not pairs:
+            self._print_empty_rates_cache()
+            return
+
+        rows = self._rates_for_base(pairs, base_currency)
+        if currency is not None:
+            rows = [row for row in rows if row.currency_code == currency]
+            if not rows:
+                print(f"Курс для '{currency}' не найден в кеше.")
+                return
+
+        if top_count is not None:
+            rows = [row for row in rows if self._is_crypto(row.currency_code)]
+            rows.sort(key=lambda row: row.rate, reverse=True)
+            rows = rows[:top_count]
+            if not rows:
+                print(f"В кеше нет курсов криптовалют относительно {base_currency}.")
+                return
+        else:
+            rows.sort(key=lambda row: row.currency_code)
+            if not rows:
+                print(f"В кеше нет курсов относительно {base_currency}.")
+                return
+
+        last_refresh = snapshot.get("last_refresh") or "неизвестно"
+        print(
+            f"Курсы из локального кеша относительно {base_currency} "
+            f"(последнее обновление: {last_refresh}):"
+        )
+        table = PrettyTable(["Пара", "Курс", "Обновлено", "Источник"])
+        for row in rows:
+            table.add_row(
+                [
+                    row.pair,
+                    f"{row.rate:,.8g}",
+                    row.updated_at,
+                    row.source,
+                ]
+            )
+        print(table)
+
+    @staticmethod
+    def _rates_for_base(
+        pairs: Mapping[str, Any],
+        base_currency: str,
+    ) -> list[_RateRow]:
+        quotes: dict[tuple[str, str], _RateRow] = {}
+        for pair, value in pairs.items():
+            match = _CACHE_PAIR.fullmatch(pair) if isinstance(pair, str) else None
+            if match is None or not isinstance(value, Mapping):
+                continue
+            raw_rate = value.get("rate")
+            if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
+                continue
+            try:
+                rate = float(raw_rate)
+            except (OverflowError, ValueError):
+                continue
+            if not math.isfinite(rate) or rate <= 0:
+                continue
+            from_code, to_code = match.groups()
+            updated_at = value.get("updated_at")
+            source = value.get("source")
+            quotes[(from_code, to_code)] = _RateRow(
+                currency_code=from_code,
+                base_code=to_code,
+                rate=rate,
+                updated_at=updated_at if isinstance(updated_at, str) else "неизвестно",
+                source=source.strip()
+                if isinstance(source, str) and source.strip()
+                else "неизвестен",
+            )
+
+        destinations: dict[str, dict[str, _RateRow]] = {}
+        for (from_code, to_code), quote in quotes.items():
+            destinations.setdefault(from_code, {})[to_code] = quote
+
+        rows: dict[str, _RateRow] = {}
+        for currency_code, available in destinations.items():
+            if currency_code == base_currency:
+                continue
+            direct_quote = available.get(base_currency)
+            if direct_quote is not None:
+                rows[currency_code] = direct_quote
+                continue
+
+            common_anchors = set(available) & set(destinations.get(base_currency, {}))
+            anchors = sorted(common_anchors, key=lambda code: (code != "USD", code))
+            for anchor in anchors:
+                numerator = available[anchor]
+                denominator = destinations[base_currency][anchor]
+                if denominator.rate <= 0:
+                    continue
+                derived_rate = numerator.rate / denominator.rate
+                if not math.isfinite(derived_rate) or derived_rate <= 0:
+                    continue
+                source_names = list(
+                    dict.fromkeys((numerator.source, denominator.source))
+                )
+                source = " + ".join(source_names)
+                timestamps = [
+                    timestamp
+                    for timestamp in (numerator.updated_at, denominator.updated_at)
+                    if timestamp != "неизвестно"
+                ]
+                rows[currency_code] = _RateRow(
+                    currency_code=currency_code,
+                    base_code=base_currency,
+                    rate=derived_rate,
+                    updated_at=min(timestamps) if timestamps else "неизвестно",
+                    source=source,
+                )
+                break
+
+        return list(rows.values())
+
+    @staticmethod
+    def _is_crypto(currency_code: str) -> bool:
+        try:
+            return isinstance(get_currency(currency_code), CryptoCurrency)
+        except CurrencyNotFoundError:
+            return False
+
+    @staticmethod
+    def _print_empty_rates_cache() -> None:
+        print(
+            "Локальный кеш курсов пуст. Выполните 'update-rates', "
+            "чтобы загрузить данные."
+        )
 
     @staticmethod
     def _parse_options(
@@ -376,7 +586,8 @@ class WalletApplication:
             "  buy --currency <валюта> --amount <количество>\n"
             "  sell --currency <валюта> --amount <количество>\n"
             "  get-rate --from <валюта> --to <валюта>\n"
-            "  update-rates\n"
+            "  update-rates [--source <coingecko|exchangerate>]\n"
+            "  show-rates [--currency <код>] [--top <N>] [--base <код>]\n"
             "  help\n"
             "  exit"
         )
