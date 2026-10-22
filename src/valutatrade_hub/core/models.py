@@ -91,6 +91,7 @@ class User:
 
     @username.setter
     def username(self, username: str) -> None:
+        """Set a trimmed, non-empty username."""
         if not isinstance(username, str):
             raise TypeError("Имя пользователя должно быть строкой.")
         normalized = username.strip()
@@ -183,6 +184,7 @@ class Wallet:
 
     @balance.setter
     def balance(self, value: int | float) -> None:
+        """Set a finite, non-negative wallet balance."""
         self._balance = validate_amount(value, allow_zero=True)
 
     def deposit(self, amount: int | float) -> float:

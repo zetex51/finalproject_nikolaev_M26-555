@@ -21,6 +21,7 @@ class Currency(ABC):
 
     @name.setter
     def name(self, value: str) -> None:
+        """Set a trimmed, non-empty human-readable name."""
         if not isinstance(value, str):
             raise TypeError("Название валюты должно быть строкой.")
         normalized = value.strip()
@@ -35,6 +36,7 @@ class Currency(ABC):
 
     @code.setter
     def code(self, value: str) -> None:
+        """Set a normalized, syntactically valid currency ticker."""
         self._code = normalize_currency_code(value)
 
     @abstractmethod
@@ -56,6 +58,7 @@ class FiatCurrency(Currency):
 
     @issuing_country.setter
     def issuing_country(self, value: str) -> None:
+        """Set a non-empty issuing country or monetary zone."""
         if not isinstance(value, str):
             raise TypeError("Страна или зона эмиссии должна быть строкой.")
         normalized = value.strip()
@@ -89,6 +92,7 @@ class CryptoCurrency(Currency):
 
     @algorithm.setter
     def algorithm(self, value: str) -> None:
+        """Set a non-empty algorithm description."""
         if not isinstance(value, str):
             raise TypeError("Алгоритм должен быть строкой.")
         normalized = value.strip()
@@ -103,6 +107,7 @@ class CryptoCurrency(Currency):
 
     @market_cap.setter
     def market_cap(self, value: int | float) -> None:
+        """Set a finite, non-negative market capitalization."""
         self._market_cap = validate_amount(value, allow_zero=True)
 
     def get_display_info(self) -> str:

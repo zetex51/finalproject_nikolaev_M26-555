@@ -47,6 +47,7 @@ class _RateRow:
 
     @property
     def pair(self) -> str:
+        """Return the currency pair's canonical cache key."""
         return f"{self.currency_code}_{self.base_code}"
 
 

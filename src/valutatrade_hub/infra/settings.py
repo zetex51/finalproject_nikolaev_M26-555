@@ -101,9 +101,11 @@ class SettingsLoader:
             {key: value for key, value in environment_values.items() if value}
         )
 
+        rates_ttl_seconds = values.get("rates_ttl_seconds")
         if (
-            not isinstance(values.get("rates_ttl_seconds"), int)
-            or values["rates_ttl_seconds"] <= 0
+            isinstance(rates_ttl_seconds, bool)
+            or not isinstance(rates_ttl_seconds, int)
+            or rates_ttl_seconds <= 0
         ):
             raise ValueError(
                 "rates_ttl_seconds должен быть положительным целым числом."

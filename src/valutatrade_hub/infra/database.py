@@ -49,22 +49,28 @@ class DatabaseManager:
             yield self
 
     def load_users(self) -> list[User]:
+        """Load all registered users from the JSON storage adapter."""
         return self._storage.load_users()
 
     def save_users(self, users: Sequence[User]) -> None:
+        """Persist the supplied user records."""
         self._storage.save_users(users)
 
     def load_portfolios(
         self,
         users_by_id: Mapping[int, User] | None = None,
     ) -> list[Portfolio]:
+        """Load portfolios and optionally associate their user records."""
         return self._storage.load_portfolios(users_by_id)
 
     def save_portfolios(self, portfolios: Sequence[Portfolio]) -> None:
+        """Persist the supplied portfolios and their wallet balances."""
         self._storage.save_portfolios(portfolios)
 
     def load_rates(self) -> dict[str, Any]:
+        """Load and normalize the current rates snapshot."""
         return self._storage.load_rates()
 
     def save_rates(self, rates: Mapping[str, Any]) -> None:
+        """Atomically persist the normalized rates snapshot."""
         self._storage.save_rates(rates)
