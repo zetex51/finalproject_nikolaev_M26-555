@@ -112,6 +112,16 @@ class BaseApiClient(ABC):
             raise ApiRequestError(
                 f"{provider}: превышен лимит запросов (HTTP 429); повторите позже"
             )
+        if status_code in {401, 403}:
+            if provider == "CoinGecko":
+                hint = "проверьте COINGECKO_API_KEY и доступность API-тарифа"
+            elif provider == "ExchangeRate-API":
+                hint = "проверьте EXCHANGERATE_API_KEY и права доступа"
+            else:
+                hint = "проверьте API-ключ и права доступа"
+            raise ApiRequestError(
+                f"{provider}: доступ отклонён (HTTP {status_code}); {hint}"
+            )
         if not 200 <= status_code < 300:
             try:
                 response.raise_for_status()

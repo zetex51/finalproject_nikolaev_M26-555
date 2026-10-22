@@ -14,17 +14,20 @@ from valutatrade_hub.core.currencies import (
     get_currency,
     supported_currency_codes,
 )
-from valutatrade_hub.core.exceptions import ApiRequestError, CurrencyNotFoundError
-from valutatrade_hub.core.usecases import (
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
     InsufficientFundsError,
     InvalidCredentialsError,
     NotAuthenticatedError,
     RateUnavailableError,
-    TradeReport,
     UnknownCurrencyError,
     UserAlreadyExistsError,
     UserNotFoundError,
     WalletNotFoundError,
+)
+from valutatrade_hub.core.usecases import (
+    TradeReport,
     WalletService,
 )
 from valutatrade_hub.infra.database import DatabaseManager
@@ -567,7 +570,9 @@ class WalletApplication:
     @staticmethod
     def _print_api_error(error: ApiRequestError) -> None:
         print(error)
-        if "EXCHANGERATE_API_KEY" in error.reason:
+        if "COINGECKO_API_KEY" in error.reason:
+            print("Проверьте COINGECKO_API_KEY и доступность API-тарифа.")
+        elif "EXCHANGERATE_API_KEY" in error.reason:
             print("Задайте ключ ExchangeRate-API в переменной окружения.")
         elif "invalid-key" in error.reason:
             print("Проверьте значение EXCHANGERATE_API_KEY.")
